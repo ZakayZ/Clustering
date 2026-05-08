@@ -43,22 +43,8 @@ class GATAffinityPolicy(nn.Module):
         n_gat_layers: int = 2,
         edge_mlp_depth: int = 1,
         edge_mlp_hidden: int | None = None,
-        running_norm: bool = True,
-        running_norm_momentum: float = 0.1,
     ) -> None:
         super().__init__()
-
-        # Per-feature BatchNorm1d (affine=False → no learnable γ/β).
-        # N nodes / E edges per event serve as the "batch" dimension, so BatchNorm
-        # normalises each feature across all nodes/edges in the current graph and
-        # maintains running mean/var across events (momentum=running_norm_momentum).
-        # momentum=0.1 matches PyTorch default for running-stat EMA during train().
-        # During model.eval() (RL rollouts) the frozen running stats are used — safe
-        # for RL because the normalisation is a fixed function at inference time.
-        # Set running_norm=False to disable entirely.
-        bn_kw = dict(affine=False, momentum=running_norm_momentum)
-        self.node_norm = nn.BatchNorm1d(in_dim,        **bn_kw) if running_norm else nn.Identity()
-        self.edge_norm = nn.BatchNorm1d(EDGE_PHYS_DIM, **bn_kw) if running_norm else nn.Identity()
 
         head_dim = hidden // n_heads
         h_e = edge_mlp_hidden if edge_mlp_hidden is not None else hidden
@@ -122,8 +108,8 @@ class GATAffinityPolicy(nn.Module):
 
         Used by :mod:`models.gat_actor_critic` for the value head on pooled ``h``.
         """
-        x = self.node_norm(data.x)
-        ea = self.edge_norm(data.edge_attr)
+        x = data.x
+        ea = data.edge_attr
         if capture is not None:
             capture.clear()
             capture["n_nodes"] = int(data.x.size(0))

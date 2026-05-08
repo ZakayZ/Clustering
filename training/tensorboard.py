@@ -1,23 +1,28 @@
-"""TensorBoard scalar logging for training history dicts (notebook-friendly)."""
+"""TensorBoard scalar logging for training history dicts."""
 
-from __future__ import annotations
-
+import shutil
 from pathlib import Path
-from typing import Any
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError as e:  # pragma: no cover
-    raise ImportError(
-        "TensorBoard logging requires the `tensorboard` package. "
-        "Install with: pip install tensorboard"
-    ) from e
+from torch.utils.tensorboard import SummaryWriter
 
 from models import MEV_PER_GEV
 
+_GEV = float(MEV_PER_GEV)
+
+
+def clear_tensorboard_notebook_root(notebook_root: str | Path) -> None:
+    """Remove ``notebook_root`` and recreate it empty."""
+    root = Path(notebook_root)
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+
 
 class TensorBoardHistoryLogger:
-    """Write the latest scalars from ``history`` each time an ``on_update`` fires."""
+    """Writes latest scalars from ``history`` when ``on_update`` runs.
+
+    ``clean=True`` deletes ``log_dir`` before opening :class:`~torch.utils.tensorboard.writer.SummaryWriter`.
+    """
 
     def __init__(
         self,
@@ -25,149 +30,133 @@ class TensorBoardHistoryLogger:
         *,
         comment: str = "",
         flush_secs: int = 10,
+        clean: bool = True,
     ) -> None:
-        self._log_dir = Path(log_dir)
+        self._log_dir = Path(log_dir).resolve()
+        if clean and self._log_dir.exists():
+            shutil.rmtree(self._log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
         self._writer = SummaryWriter(
             log_dir=str(self._log_dir),
             comment=comment,
             flush_secs=flush_secs,
         )
+        self._val_logged = 0
 
     def close(self) -> None:
+        self.flush()
         self._writer.close()
 
     def flush(self) -> None:
         self._writer.flush()
 
     @staticmethod
-    def _latest_step(h: dict[str, list], primary_key: str) -> int:
-        seq = h.get(primary_key)
-        if not seq:
-            return -1
-        return len(seq) - 1
+    def _step(h: dict[str, list], key: str) -> int:
+        seq = h.get(key)
+        return len(seq) - 1 if seq else -1
 
-    def _w(self) -> Any:
-        return self._writer
+    def _emit(
+        self,
+        h: dict[str, list],
+        prefix: str,
+        step: int,
+        keys_tags_gev: list[tuple[str, str, bool]],
+    ) -> None:
+        """Each triple is ``(history_key, tensorboard_tag_suffix, divide_by_GeV)``."""
+        w = self._writer
+        for hk, tag, as_gev in keys_tags_gev:
+            seq = h.get(hk)
+            if not seq:
+                continue
+            v = float(seq[-1])
+            if as_gev:
+                v /= _GEV
+            w.add_scalar(f"{prefix}/{tag}", v, step)
+
+    def _sync_validation(self, h: dict[str, list], prefix: str) -> None:
+        steps = h.get("val_step") or []
+        losses = h.get("val_mean_partition_loss_mev") or []
+        w = self._writer
+        pfx = prefix.strip().lower()
+        while self._val_logged < len(steps) and self._val_logged < len(losses):
+            w.add_scalar(
+                f"{pfx}/val/partition_loss_gev",
+                float(losses[self._val_logged]) / _GEV,
+                int(steps[self._val_logged]),
+            )
+            self._val_logged += 1
 
     def log_supervised(self, h: dict[str, list]) -> None:
-        step = self._latest_step(h, "supervised_bce")
+        step = self._step(h, "supervised_bce")
         if step < 0:
             return
-        w = self._w()
-        mev = float(MEV_PER_GEV)
-        w.add_scalar("supervised/bce", float(h["supervised_bce"][-1]), step)
-        if h.get("supervised_pos_weight"):
-            w.add_scalar("supervised/pos_weight", float(h["supervised_pos_weight"][-1]), step)
-        if h.get("pretrain_partition_loss"):
-            w.add_scalar(
-                "supervised/partition_loss_gev",
-                float(h["pretrain_partition_loss"][-1]) / mev,
-                step,
-            )
-        if h.get("pretrain_baseline_loss"):
-            w.add_scalar(
-                "supervised/baseline_loss_gev",
-                float(h["pretrain_baseline_loss"][-1]) / mev,
-                step,
-            )
-        if h.get("pretrain_gap"):
-            w.add_scalar("supervised/gap_gev", float(h["pretrain_gap"][-1]) / mev, step)
-        if h.get("pretrain_pos_recall_05"):
-            w.add_scalar(
-                "supervised/pos_recall_at_05",
-                float(h["pretrain_pos_recall_05"][-1]),
-                step,
-            )
-        if h.get("pretrain_frac_pred_on_05"):
-            w.add_scalar(
-                "supervised/frac_edges_pred_on_at_05",
-                float(h["pretrain_frac_pred_on_05"][-1]),
-                step,
-            )
-        if h.get("pretrain_mean_prob_pos_edges"):
-            w.add_scalar(
-                "supervised/mean_prob_pos_edges",
-                float(h["pretrain_mean_prob_pos_edges"][-1]),
-                step,
-            )
-        if h.get("pretrain_mean_prob_neg_edges"):
-            w.add_scalar(
-                "supervised/mean_prob_neg_edges",
-                float(h["pretrain_mean_prob_neg_edges"][-1]),
-                step,
-            )
-        if h.get("pretrain_mean_n_clusters"):
-            w.add_scalar(
-                "supervised/mean_n_clusters",
-                float(h["pretrain_mean_n_clusters"][-1]),
-                step,
-            )
+        self._emit(
+            h,
+            "supervised",
+            step,
+            [
+                ("pretrain_partition_loss", "partition_loss_gev", True),
+                ("pretrain_baseline_loss", "baseline_loss_gev", True),
+                ("supervised_bce", "bce", False),
+                ("supervised_pos_weight", "pos_weight", False),
+                ("pretrain_pos_recall_05", "pos_recall_at_05", False),
+                ("pretrain_frac_pred_on_05", "frac_edges_pred_on_at_05", False),
+                ("pretrain_mean_prob_pos_edges", "mean_prob_pos_edges", False),
+                ("pretrain_mean_prob_neg_edges", "mean_prob_neg_edges", False),
+                ("pretrain_mean_n_clusters", "mean_n_clusters", False),
+            ],
+        )
+        self._sync_validation(h, "supervised")
 
     def log_reinforce(self, h: dict[str, list]) -> None:
-        step = self._latest_step(h, "episode_return")
+        step = self._step(h, "episode_return")
         if step < 0:
             return
-        w = self._w()
-        mev = float(MEV_PER_GEV)
-        w.add_scalar("reinforce/episode_return_gev", float(h["episode_return"][-1]) / mev, step)
-        if h.get("return_baseline"):
-            w.add_scalar(
-                "reinforce/return_baseline_gev",
-                float(h["return_baseline"][-1]) / mev,
-                step,
-            )
-        if h.get("partition_loss"):
-            w.add_scalar(
-                "reinforce/partition_loss_gev",
-                float(h["partition_loss"][-1]) / mev,
-                step,
-            )
-        if h.get("baseline_loss"):
-            w.add_scalar(
-                "reinforce/baseline_loss_gev",
-                float(h["baseline_loss"][-1]) / mev,
-                step,
-            )
-        if h.get("policy_loss"):
-            w.add_scalar("reinforce/policy_loss", float(h["policy_loss"][-1]), step)
-        if h.get("lr"):
-            w.add_scalar("reinforce/lr", float(h["lr"][-1]), step)
-        if h.get("edge_entropy"):
-            w.add_scalar("reinforce/edge_entropy", float(h["edge_entropy"][-1]), step)
-        if h.get("n_clusters"):
-            w.add_scalar("reinforce/mean_n_clusters", float(h["n_clusters"][-1]), step)
+        self._emit(
+            h,
+            "reinforce",
+            step,
+            [
+                ("partition_loss", "partition_loss_gev", True),
+                ("baseline_loss", "baseline_loss_gev", True),
+                ("episode_return", "episode_return_gev", True),
+                ("return_baseline", "return_baseline_gev", True),
+                ("policy_loss", "policy_loss", False),
+                ("lr", "lr", False),
+                ("edge_entropy", "edge_entropy", False),
+                ("n_clusters", "mean_n_clusters", False),
+            ],
+        )
+        self._sync_validation(h, "reinforce")
 
     def log_actor_critic(self, h: dict[str, list], *, algo: str) -> None:
-        """Log ``train_actor_critic`` / ``train_ppo`` history. ``algo`` is ``a2c`` or ``ppo``."""
-        step = self._latest_step(h, "episode_return")
+        step = self._step(h, "episode_return")
         if step < 0:
             return
-        w = self._w()
-        mev = float(MEV_PER_GEV)
         p = algo.strip().lower()
         if p not in ("a2c", "ppo"):
             raise ValueError(f"algo must be 'a2c' or 'ppo', got {algo!r}")
-        w.add_scalar(f"{p}/episode_return_gev", float(h["episode_return"][-1]) / mev, step)
-        if h.get("value_mean"):
-            w.add_scalar(f"{p}/value_mean_gev", float(h["value_mean"][-1]) / mev, step)
-        if h.get("advantage_mean"):
-            w.add_scalar(f"{p}/advantage_mean", float(h["advantage_mean"][-1]), step)
-        if h.get("partition_loss"):
-            w.add_scalar(f"{p}/partition_loss_gev", float(h["partition_loss"][-1]) / mev, step)
-        if h.get("baseline_loss"):
-            w.add_scalar(f"{p}/baseline_loss_gev", float(h["baseline_loss"][-1]) / mev, step)
-        if h.get("policy_loss"):
-            w.add_scalar(f"{p}/policy_loss", float(h["policy_loss"][-1]), step)
-        if h.get("value_loss"):
-            w.add_scalar(f"{p}/value_loss", float(h["value_loss"][-1]), step)
-        if h.get("lr"):
-            w.add_scalar(f"{p}/lr", float(h["lr"][-1]), step)
-        if h.get("edge_entropy"):
-            w.add_scalar(f"{p}/edge_entropy", float(h["edge_entropy"][-1]), step)
-        if h.get("n_clusters"):
-            w.add_scalar(f"{p}/mean_n_clusters", float(h["n_clusters"][-1]), step)
+        base = [
+            ("partition_loss", "partition_loss_gev", True),
+            ("baseline_loss", "baseline_loss_gev", True),
+            ("episode_return", "episode_return_gev", True),
+            ("value_mean", "value_mean_gev", True),
+            ("advantage_mean", "advantage_mean", False),
+            ("policy_loss", "policy_loss", False),
+            ("value_loss", "value_loss", False),
+            ("lr", "lr", False),
+            ("edge_entropy", "edge_entropy", False),
+            ("n_clusters", "mean_n_clusters", False),
+        ]
+        self._emit(h, p, step, base)
         if p == "ppo":
-            if h.get("approx_kl"):
-                w.add_scalar("ppo/approx_kl", float(h["approx_kl"][-1]), step)
-            if h.get("clip_fraction"):
-                w.add_scalar("ppo/clip_fraction", float(h["clip_fraction"][-1]), step)
+            self._emit(
+                h,
+                "ppo",
+                step,
+                [
+                    ("approx_kl", "approx_kl", False),
+                    ("clip_fraction", "clip_fraction", False),
+                ],
+            )
+        self._sync_validation(h, p)

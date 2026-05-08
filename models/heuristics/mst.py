@@ -8,10 +8,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
-from models.baseline import (
-    EventBaseline,
-    make_event_baseline,
-)
+from models.heuristics.utils import EventBaseline, make_event_baseline
 from models.heuristics.coalescence import _components_to_partition, _pos3_stack
 
 # Tuned on ``urqmd_nucleons_1k`` (see ``scripts/search_mst_negative_loss.py``): negative mean partition loss.
@@ -239,6 +236,8 @@ class MSTModel:
         pos: np.ndarray,
         mom: np.ndarray,
         is_proton: np.ndarray,
+        *,
+        event_index: int | None = None,
     ) -> EventBaseline:
         n_ev = int(pos.shape[0])
         part = mst_partition_numpy(

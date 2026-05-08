@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
 import torch
@@ -29,12 +30,25 @@ def make_event_baseline(
     partition: list[list[int]],
 ) -> EventBaseline:
     """Node labels + partition loss from a fixed clustering (``partition`` lists global indices)."""
-    n_ev = int(pos.shape[0])
-    node_lab = np.empty((n_ev,), dtype=np.int32)
+
+    node_lab = np.zeros((pos.shape[0],), dtype=np.int32)
     for ci, clus in enumerate(partition):
         node_lab[np.asarray(clus, dtype=np.int64)] = int(ci)
     loss = float(partition_loss_numpy(pos, mom, is_proton, partition))
     return EventBaseline(node_labels=node_lab, loss=loss, partition=partition)
+
+
+def partition_within_cluster_edge_pairs(partition: list[list[int]]) -> tuple[np.ndarray, np.ndarray]:
+    """Undirected intra-cluster pairs ``i < j`` as ``(edge_i, edge_j)`` int64 arrays."""
+    ei: list[int] = []
+    ej: list[int] = []
+    for c in partition:
+        if len(c) < 2:
+            continue
+        for i, j in combinations(sorted(int(x) for x in c), 2):
+            ei.append(i)
+            ej.append(j)
+    return np.asarray(ei, dtype=np.int64), np.asarray(ej, dtype=np.int64)
 
 
 def edge_pair_baseline_targets(

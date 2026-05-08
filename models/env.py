@@ -8,86 +8,13 @@ import numpy as np
 import torch
 from scipy.sparse import csr_matrix
 from scipy.sparse import csgraph
-import torch_geometric.nn as pyg_nn
 from torch_geometric.data import Data
-from torch_geometric.transforms import KNNGraph
-from torch_geometric.utils import to_undirected
 
 from cluster_energy import NucleonCloud, cluster_energy, partition_loss_numpy
 
-from models.affinity_graph_config import AffinityGraphConfig
-from models.constants import GraphKind
+from models.graph import GraphBuilder
 from models.heuristics.constants import HBARC_MEV_FM, K_CUT_FM_INV, R_CUT_FM
 from models.heuristics.protocol import BaselineModel
-
-
-def _policy_edges_from_directed(ei: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split directed ``edge_index`` into undirected policy pairs (``src < dst``) and index mask."""
-    src, dst = ei[0], ei[1]
-    keep = src < dst
-    return src[keep], dst[keep], torch.nonzero(keep, as_tuple=True)[0].long()
-
-
-def _build_knn_graph(pos: np.ndarray, mom_phys_or_k: np.ndarray, transform: KNNGraph) -> Data:
-    """kNN in ``(r, k)`` (6-D): ``r`` fm; second arg is either ``mom`` ``(N,4)`` MeV/c or ``k`` ``(N,3)`` fm⁻¹."""
-    m = np.asarray(mom_phys_or_k, dtype=np.float64)
-    if m.shape[1] == 4:
-        k = m[:, 1:4] / HBARC_MEV_FM
-    else:
-        k = m
-    six = np.concatenate([np.asarray(pos, dtype=np.float64), k], axis=1).astype(np.float32)
-    d = transform(Data(pos=torch.tensor(six)))
-    ei = d.edge_index
-    pi, pj, pidx = _policy_edges_from_directed(ei)
-    d.edge_pair_i = pi
-    d.edge_pair_j = pj
-    d.policy_edge_idx = pidx
-    return d
-
-
-def _build_radius_graph(r3: np.ndarray, k3: np.ndarray, radius_norm: float) -> Data:
-    """Radius edges in normalized ``(r/R_cut, k/K_cut)`` 6-D Euclidean space.
-
-    ``radius_norm ≈ 1`` connects pairs separated by ~one baseline gate scale in mixed units.
-    Falls back to kNN ``k=3`` if no edges (too-small radius on sparse clouds).
-    """
-    n = int(r3.shape[0])
-    x = np.concatenate(
-        [np.asarray(r3, dtype=np.float64) / R_CUT_FM, np.asarray(k3, dtype=np.float64) / float(K_CUT_FM_INV)],
-        axis=1,
-    ).astype(np.float32)
-    pos_t = torch.from_numpy(x)
-    ei = pyg_nn.radius_graph(pos_t, r=float(radius_norm), loop=False)
-    if ei.numel() == 0 or n <= 1:
-        fallback = KNNGraph(k=min(3, max(n - 1, 1)), loop=False, force_undirected=True)
-        return _build_knn_graph(r3, k3, fallback)
-    ei = to_undirected(ei, num_nodes=n)
-    d = Data(edge_index=ei)
-    pi, pj, pidx = _policy_edges_from_directed(ei)
-    d.edge_pair_i = pi
-    d.edge_pair_j = pj
-    d.policy_edge_idx = pidx
-    return d
-
-
-def _build_complete_graph(n: int) -> Data:
-    """All ordered pairs ``i → j``, ``i ≠ j`` (bidirectional), for full message passing."""
-    if n <= 1:
-        return Data(edge_index=torch.zeros((2, 0), dtype=torch.long), edge_pair_i=torch.zeros(0, dtype=torch.long), edge_pair_j=torch.zeros(0, dtype=torch.long), policy_edge_idx=torch.zeros(0, dtype=torch.long))
-    rows: list[int] = []
-    cols: list[int] = []
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                rows.append(i)
-                cols.append(j)
-    ei = torch.tensor([rows, cols], dtype=torch.long)
-    d = Data(edge_index=ei)
-    pi, pj, pidx = _policy_edges_from_directed(ei)
-    d.edge_pair_i = pi
-    d.edge_pair_j = pj
-    d.policy_edge_idx = pidx
-    return d
 
 
 def labels_to_partition(labels: np.ndarray) -> list[list[int]]:
@@ -162,21 +89,40 @@ class AffinityGraphEnv:
     ``reset`` fills ``_baseline_node_labels`` / ``_baseline_loss`` from the required
     :class:`~models.heuristics.protocol.BaselineModel` (e.g.
     :class:`~models.heuristics.coalescence.CoalescenceHeuristicModel` with cut-like params).
+    Optional ``event_index`` is forwarded to the baseline so indexed caches stay aligned with data order.
 
-    The returned ``Data`` has node features ``x``, ``edge_index`` / ``edge_attr`` from
-    kNN / radius / complete topology (one ``edge_attr`` row per directed edge), plus
-    ``edge_pair_*`` and ``policy_edge_idx`` for the undirected policy edge list (``src < dst``).
+    Graph topology comes from a :class:`~models.graph.GraphBuilder` (kNN / radius / full).
+    Before topology, ``reset`` converts spatial ``r3`` (fm) and wavevector ``k3`` (fm^-1)
+    to cut units using ``dr_cut_scale_fm`` / ``dk_cut_scale_fm_inv``, then passes those arrays to
+    the builder (so builders never divide by ``R_CUT``/``K_CUT`` themselves).
+    Node and edge features use ``feat_scale_*`` and cut scales below (defaults match the prior
+    standalone config dataclass that was merged into this constructor).
+
+    The returned ``Data`` has node features ``x``, ``edge_index`` / ``edge_attr`` from the builder,
+    plus ``edge_pair_*`` and ``policy_edge_idx`` for the undirected policy edge list (``src < dst``).
 
     After ``reset``, ``graph`` is the single ``Data`` passed to the policy."""
 
-    def __init__(self, cfg: AffinityGraphConfig, baseline: BaselineModel) -> None:
-        self.cfg = cfg
+    def __init__(
+        self,
+        graph_builder: GraphBuilder,
+        baseline: BaselineModel,
+        *,
+        feat_scale_r_fm: float = 50.0,
+        feat_scale_e: float = 2000.0,
+        feat_scale_k_fm_inv: float = 5.0,
+        dr_cut_scale_fm: float = R_CUT_FM,
+        dk_cut_scale_fm_inv: float = K_CUT_FM_INV,
+        cluster_dissolve_energy_threshold_mev: float | None = None,
+    ) -> None:
+        self._graph_builder = graph_builder
         self.baseline = baseline
-        self._knn = (
-            KNNGraph(k=cfg.k_nn, loop=False, force_undirected=True)
-            if cfg.graph_kind == "knn"
-            else None
-        )
+        self._feat_scale_r_fm = float(feat_scale_r_fm)
+        self._feat_scale_e = float(feat_scale_e)
+        self._feat_scale_k_fm_inv = float(feat_scale_k_fm_inv)
+        self._dr_cut_scale_fm = float(dr_cut_scale_fm)
+        self._dk_cut_scale_fm_inv = float(dk_cut_scale_fm_inv)
+        self._cluster_dissolve_energy_threshold_mev = cluster_dissolve_energy_threshold_mev
         self.pos = np.zeros((0, 4), dtype=np.float64)
         self.mom = np.zeros((0, 4), dtype=np.float64)
         self.isp = np.zeros((0,), dtype=bool)
@@ -189,7 +135,14 @@ class AffinityGraphEnv:
     def n_real_edges(self) -> int:
         return int(self.graph.edge_pair_i.shape[0])
 
-    def reset(self, pos: np.ndarray, mom: np.ndarray, is_proton: np.ndarray) -> Data:
+    def reset(
+        self,
+        pos: np.ndarray,
+        mom: np.ndarray,
+        is_proton: np.ndarray,
+        *,
+        event_index: int | None = None,
+    ) -> Data:
         pos_a = np.asarray(pos, dtype=np.float64)
         if pos_a.shape[1] == 3:
             pos_geo = np.concatenate(
@@ -205,21 +158,15 @@ class AffinityGraphEnv:
         self.mom = mom
         self.isp = is_proton
 
-        if self.cfg.graph_kind == "knn":
-            assert self._knn is not None
-            self.graph = _build_knn_graph(r3, k3, self._knn)
-        elif self.cfg.graph_kind == "radius":
-            self.graph = _build_radius_graph(r3, k3, float(self.cfg.radius_norm))
-        elif self.cfg.graph_kind == "full":
-            self.graph = _build_complete_graph(int(r3.shape[0]))
-        else:
-            raise ValueError(f"unknown graph_kind {self.cfg.graph_kind!r}")
+        sr = self._feat_scale_r_fm
+        se = self._feat_scale_e
+        sk = self._feat_scale_k_fm_inv
+        sdr = self._dr_cut_scale_fm
+        sdk = self._dk_cut_scale_fm_inv
 
-        sr = float(self.cfg.feat_scale_r_fm)
-        se = float(self.cfg.feat_scale_e)
-        sk = float(self.cfg.feat_scale_k_fm_inv)
-        sdr = float(self.cfg.dr_cut_scale_fm)
-        sdk = float(self.cfg.dk_cut_scale_fm_inv)
+        r3_cut = np.asarray(r3, dtype=np.float64) / sdr
+        k3_cut = np.asarray(k3, dtype=np.float64) / sdk
+        self.graph = self._graph_builder.build(r3_cut, k3_cut)
 
         # Scaled phase-space for nodes & edges (t dropped — always 0 for 3-D datasets).
         phase_space = np.concatenate(
@@ -242,7 +189,7 @@ class AffinityGraphEnv:
             [delta, phase_space_t[i], phase_space_t[j], dr_cut, dk_cut],
             dim=1,
         )  # shape (E_dir, 23)
-        bl = self.baseline(self.pos, self.mom, self.isp)
+        bl = self.baseline(self.pos, self.mom, self.isp, event_index=event_index)
         self._baseline_node_labels = bl.node_labels.astype(np.int32)
         self._baseline_loss = float(bl.loss)
         return self.graph
@@ -254,7 +201,7 @@ class AffinityGraphEnv:
             n, self.graph.edge_pair_i.numpy(), self.graph.edge_pair_j.numpy(), on
         )
         part = labels_to_partition(labels_cc)
-        thr = self.cfg.cluster_dissolve_energy_threshold_mev
+        thr = self._cluster_dissolve_energy_threshold_mev
         if thr is not None:
             part = dissolve_unfavorable_clusters(
                 self.pos, self.mom, self.isp, part, energy_threshold_mev=float(thr)

@@ -3,8 +3,8 @@ import itertools
 import math
 import numpy as np
 import masstable
-from scipy.special import erf
 
+from scipy.special import erf
 from dataclasses import dataclass
 
 
@@ -165,21 +165,25 @@ def binding_prior(a: int, z: int) -> float:
 # UrQMD hard EoS parameters (Table 3.1, no Pauli by default), energies in MeV
 # -----------------------------------------------------------------------------
 
-URQMD_ALPHA_FM_INV2 = 0.25
-URQMD_T1_FM3 = -7264.04
-URQMD_TGAMMA_FM6 = 87.65
-URQMD_V0YUK_FM = -0.498
-URQMD_GAMMA_Y_FM = 1.4
-URQMD_E2_FM = 1.44
 
-URQMD_P_REL_MAX = 2000.0
+class ClusterEnergySettings:
+    """UrQMD-style hard EoS parameters (Table 3.1); all UrQMD pair/triplet code reads from here."""
 
-URQMD_USE_PAULI_APPROX = False
-URQMD_V0PAU = 98.95
-URQMD_Q0_FM = 2.16
-URQMD_P0 = 120.0
+    URQMD_ALPHA_FM_INV2 = 0.25
+    URQMD_T1_FM3 = -7264.04
+    URQMD_TGAMMA_FM6 = 87.65
+    URQMD_V0YUK_FM = -0.498
+    URQMD_GAMMA_Y_FM = 1.4
+    URQMD_E2_FM = 1.44
 
-URQMD_USE_SK3 = False
+    URQMD_P_REL_MAX = 2000.0
+
+    URQMD_USE_PAULI_APPROX = False
+    URQMD_V0PAU = 98.95
+    URQMD_Q0_FM = 2.16
+    URQMD_P0 = 120.0
+
+    URQMD_USE_SK3 = False
 
 
 def cluster_internal_kinetic(cloud: NucleonCloud, cluster: list[int]) -> float:
@@ -196,8 +200,8 @@ def cluster_internal_kinetic(cloud: NucleonCloud, cluster: list[int]) -> float:
 
 
 def _urqmd_sk2_pair_energy_vec(r: np.ndarray) -> np.ndarray:
-    alpha = URQMD_ALPHA_FM_INV2
-    return URQMD_T1_FM3 * (alpha / math.pi) ** 1.5 * np.exp(-alpha * r * r)
+    alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
+    return ClusterEnergySettings.URQMD_T1_FM3 * (alpha / math.pi) ** 1.5 * np.exp(-alpha * r * r)
 
 
 def _urqmd_yukawa_pair_energy_vec(r: np.ndarray) -> np.ndarray:
@@ -206,9 +210,9 @@ def _urqmd_yukawa_pair_energy_vec(r: np.ndarray) -> np.ndarray:
     if not np.any(mask):
         return out
     r_m = r[mask]
-    alpha = URQMD_ALPHA_FM_INV2
-    gamma_y = URQMD_GAMMA_Y_FM
-    v0 = URQMD_V0YUK_FM
+    alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
+    gamma_y = ClusterEnergySettings.URQMD_GAMMA_Y_FM
+    v0 = ClusterEnergySettings.URQMD_V0YUK_FM
     pref = v0 * (1.0 / (2.0 * r_m)) * np.exp(1.0 / (4.0 * alpha * gamma_y * gamma_y))
     a = 1.0 / (2.0 * gamma_y * math.sqrt(alpha))
     b = math.sqrt(alpha) * r_m
@@ -225,21 +229,21 @@ def _urqmd_coulomb_pair_energy_vec(z_prod: np.ndarray, r: np.ndarray) -> np.ndar
         return out
     r_m = r[mask]
     z_m = z_prod[mask]
-    alpha = URQMD_ALPHA_FM_INV2
-    out[mask] = (z_m * URQMD_E2_FM / r_m) * erf(np.sqrt(alpha) * r_m)
+    alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
+    out[mask] = (z_m * ClusterEnergySettings.URQMD_E2_FM / r_m) * erf(np.sqrt(alpha) * r_m)
     return out
 
 
 def _urqmd_pauli_pair_energy_vec(
     r: np.ndarray, p_rel: np.ndarray, same_isospin: np.ndarray
 ) -> np.ndarray:
-    if not URQMD_USE_PAULI_APPROX:
+    if not ClusterEnergySettings.URQMD_USE_PAULI_APPROX:
         return np.zeros_like(r)
-    alpha = URQMD_ALPHA_FM_INV2
-    q0 = URQMD_Q0_FM
-    p0 = URQMD_P0
+    alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
+    q0 = ClusterEnergySettings.URQMD_Q0_FM
+    p0 = ClusterEnergySettings.URQMD_P0
     pref = (
-        URQMD_V0PAU
+        ClusterEnergySettings.URQMD_V0PAU
         * (1.0 / (p0 * q0)) ** 3
         * (1.0 + 1.0 / (2.0 * alpha * q0 * q0)) ** (-1.5)
     )
@@ -273,7 +277,7 @@ def urqmd_pair_energies_upper_triangle(
     e_coul = _urqmd_coulomb_pair_energy_vec(z_prod, r_p)
     e_pau = _urqmd_pauli_pair_energy_vec(r_p, p_rel_p, same_iso)
     e = e_sk2 + e_yuk + e_coul + e_pau
-    return np.where(p_rel_p < URQMD_P_REL_MAX, e, 0.0)
+    return np.where(p_rel_p < ClusterEnergySettings.URQMD_P_REL_MAX, e, 0.0)
 
 
 def _urqmd_sk3_triplet_from_pair_values(
@@ -284,10 +288,10 @@ def _urqmd_sk3_triplet_from_pair_values(
     rik: float,
     rjk: float,
 ) -> float:
-    if max(pij, pik, pjk) >= URQMD_P_REL_MAX:
+    if max(pij, pik, pjk) >= ClusterEnergySettings.URQMD_P_REL_MAX:
         return 0.0
-    alpha = URQMD_ALPHA_FM_INV2
-    pref = URQMD_TGAMMA_FM6 * (4.0 * alpha**2 / (3.0 * math.pi**2)) ** 1.5
+    alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
+    pref = ClusterEnergySettings.URQMD_TGAMMA_FM6 * (4.0 * alpha**2 / (3.0 * math.pi**2)) ** 1.5
     term_i = math.exp(-alpha * (rij * rij + rik * rik))
     term_j = math.exp(-alpha * (rij * rij + rjk * rjk))
     term_k = math.exp(-alpha * (rik * rik + rjk * rjk))
@@ -309,7 +313,7 @@ def cluster_pair_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
 
 
 def cluster_triplet_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
-    if not URQMD_USE_SK3:
+    if not ClusterEnergySettings.URQMD_USE_SK3:
         return 0.0
     idx = np.asarray(cluster, dtype=int)
     n = int(idx.size)

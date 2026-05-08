@@ -199,6 +199,8 @@ class CoalescenceHeuristicModel:
         pos: np.ndarray,
         mom: np.ndarray,
         is_proton: np.ndarray,
+        *,
+        event_index: int | None = None,
     ) -> EventBaseline:
         c = self.params
         part_b = fast_coalescence_partition(

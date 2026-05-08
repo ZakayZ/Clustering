@@ -329,10 +329,12 @@ class CCLAnnealRefinementModel:
         pos: np.ndarray,
         mom: np.ndarray,
         is_proton: np.ndarray,
+        *,
+        event_index: int | None = None,
     ) -> EventBaseline:
         n_ev = int(pos.shape[0])
         uni = list(range(n_ev))
-        base = self.inner(pos, mom, is_proton)
+        base = self.inner(pos, mom, is_proton, event_index=event_index)
         init = normalize_partition(base.partition)
         check_partition(init, uni)
 

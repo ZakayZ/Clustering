@@ -1,17 +1,14 @@
-"""Shared helpers for RL and supervised edge training (eval, BCE, sampling, grad stats)."""
+"""Shared helpers for RL and supervised edge training (eval, BCE, sampling)."""
 
-import math
 import enum
-from collections import defaultdict
-from typing import Any, Callable, Literal
-
-
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
-from models.baseline import edge_pair_baseline_targets
+from dataclasses import dataclass
+from typing import Callable
+
+from models.heuristics.utils import edge_pair_baseline_targets
 from models.env import AffinityGraphEnv
 from models.policy import GATAffinityPolicy
 
@@ -21,40 +18,82 @@ class RLActionMode(enum.StrEnum):
     THRESHOLD = enum.auto()
 
 
-def deterministic_eval_mean(
+@dataclass(frozen=True)
+class ValueWarmupConfig:
+    """Optional critic warm-start via :func:`training.a2c.warm_start_value_head` when ``steps > 0``.
+
+    Used by :func:`training.ppo.train_ppo` and :func:`training.a2c.train_actor_critic`.
+    """
+
+    steps: int = 0
+    lr: float = 3e-3
+    episodes_per_step: int | None = None
+
+
+def evaluate_validation_deterministic_policy(
     policy: GATAffinityPolicy,
     env: AffinityGraphEnv,
-    event_sampler: Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]],
-    n_rollouts: int,
-) -> tuple[float, float, float]:
-    """Mean return (MeV), mean L_pol (MeV), mean gap (MeV) with deterministic threshold masks."""
+    events: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> dict[str, float]:
+    """Deterministic threshold mask over ``events`` (no gradients).
 
+    Pass a sliced ``events`` list to limit validation cost. ``event_index=i`` is passed on
+    :meth:`~models.env.AffinityGraphEnv.reset` so stored baselines match cache order.
+    """
     policy.eval()
-    rets: list[float] = []
-    gaps: list[float] = []
-    lp: list[float] = []
-    for _ in range(max(int(n_rollouts), 1)):
-        pos, mom, isp = event_sampler()
-        obs = env.reset(pos, mom, isp)
+    partition_losses: list[float] = []
+    baseline_losses: list[float] = []
+    cluster_counts: list[float] = []
+    try:
+        with torch.no_grad():
+            for i, (pos, mom, isp) in enumerate(events):
+                obs = env.reset(pos, mom, isp, event_index=int(i))
+                logits = policy(obs)
+                deterministic_actions = (torch.sigmoid(logits) > 0.5).float()
+                partition_loss, cluster_labels = env.physics_for_edge_mask(
+                    deterministic_actions
+                )
+                baseline_loss = float(env._baseline_loss)
+                partition_losses.append(float(partition_loss))
+                baseline_losses.append(baseline_loss)
+                cluster_counts.append(float(len(np.unique(cluster_labels))))
+    finally:
+        policy.train()
+    return {
+        "val_n_events": float(len(events)),
+        "val_mean_partition_loss_mev": float(np.mean(partition_losses)),
+        "val_mean_baseline_loss_mev": float(np.mean(baseline_losses)),
+        "val_mean_n_clusters": float(np.mean(cluster_counts)),
+    }
+
+
+def eval_physics_loss_deterministic_dataset(
+    policy: GATAffinityPolicy,
+    env: AffinityGraphEnv,
+    events: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> dict[str, float]:
+    """Partition loss (MeV) per event with deterministic threshold masks; full pass over ``events``.
+
+    ``best`` = minimum loss (most negative binding). Pass ``event_index=i`` on reset so
+    :class:`~models.heuristics.static_partition.StaticPartitionBaseline` stays aligned.
+    """
+    policy.eval()
+    partition_losses: list[float] = []
+    for i, (pos, mom, isp) in enumerate(events):
+        obs = env.reset(pos, mom, isp, event_index=i)
         logits = policy(obs)
-        a = (torch.sigmoid(logits) > 0.5).float()
-        loss, _ = env.physics_for_edge_mask(a)
-        lb = float(env._baseline_loss)
-        Lp = float(loss)
-        lp.append(Lp)
-        gaps.append(Lp - lb)
-        rets.append(float(-Lp))
+        deterministic_actions = (torch.sigmoid(logits) > 0.5).float()
+        partition_loss, _ = env.physics_for_edge_mask(deterministic_actions)
+        partition_losses.append(float(partition_loss))
     policy.train()
-    return float(np.mean(rets)), float(np.mean(lp)), float(np.mean(gaps))
-
-
-def _total_grad_norm(params: list[torch.Tensor]) -> float:
-    s = 0.0
-    for p in params:
-        if p.grad is None:
-            continue
-        s += float(p.grad.detach().pow(2).sum().item())
-    return math.sqrt(s)
+    arr = np.asarray(partition_losses, dtype=np.float64)
+    return {
+        "mean_loss_mev": float(arr.mean()),
+        "best_loss_mev": float(arr.min()),
+        "worst_loss_mev": float(arr.max()),
+        "std_loss_mev": float(arr.std(ddof=0)),
+        "n_events": int(len(events)),
+    }
 
 
 def baseline_edge_targets(env: AffinityGraphEnv) -> torch.Tensor:
@@ -100,45 +139,8 @@ def weighted_bce_with_logits(
     return loss, pw
 
 
-def _tensor_stats_f64(t: torch.Tensor) -> dict[str, float]:
-    x = t.detach().float().cpu().reshape(-1)
-    x = x[torch.isfinite(x)]
-    if x.numel() == 0:
-        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "numel": 0.0}
-    return {
-        "mean": float(x.mean()),
-        "std": float(x.std(unbiased=False)),
-        "min": float(x.min()),
-        "max": float(x.max()),
-        "numel": float(x.numel()),
-    }
-
-
-def _policy_grad_norm_by_prefix(policy: nn.Module) -> dict[str, float]:
-    sums: dict[str, float] = defaultdict(float)
-    for name, p in policy.named_parameters():
-        if p.grad is None:
-            continue
-        sums[name.split(".", 1)[0]] += float(p.grad.detach().pow(2).sum().item())
-    return {f"grad_norm_{k}": math.sqrt(v) for k, v in sums.items()}
-
-
-def _summarize_supervised_capture(capture: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for k in ("node_x", "edge_attr", "h", "le_full", "logits_raw", "logits_out"):
-        if k in capture and isinstance(capture[k], torch.Tensor):
-            out[k] = _tensor_stats_f64(capture[k])
-    for k in ("n_nodes", "n_dir_edges", "n_policy_edges"):
-        if k in capture:
-            out[k] = capture[k]
-    if "logits_raw" in capture and "logits_out" in capture:
-        r = capture["logits_raw"].detach().float().reshape(-1)
-        o = capture["logits_out"].detach().float().reshape(-1)
-        out["frac_logits_changed_postprocess"] = float((~torch.isclose(r, o, rtol=0.0, atol=1e-7)).float().mean())
-    return out
-
-
 type EventSampler = Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]]
+type EventSamplerIndexed = Callable[[], tuple[int, np.ndarray, np.ndarray, np.ndarray]]
 
 
 def make_event_sampler(
@@ -154,5 +156,21 @@ def make_event_sampler(
             return pos.copy(), mom.copy(), isp.copy()
         pos, mom, isp = fallback_urqmd()
         return pos, mom, isp
+
+    return sample_event
+
+
+def make_event_sampler_indexed(
+    events: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    rng: np.random.Generator,
+) -> EventSamplerIndexed:
+    """Like :func:`make_event_sampler` but returns ``(index, pos, mom, isp)`` for cached baselines."""
+
+    def sample_event() -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+        if not events:
+            raise ValueError("make_event_sampler_indexed requires non-empty events")
+        event_index = int(rng.integers(0, len(events)))
+        pos, mom, isp = events[event_index]
+        return event_index, pos.copy(), mom.copy(), isp.copy()
 
     return sample_event

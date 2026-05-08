@@ -44,9 +44,17 @@ class GATAffinityActorCritic(nn.Module):
         data: Data,
         *,
         capture: dict[str, Any] | None = None,
+        detach_value_features: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return edge logits and scalar ``V(s)`` (full gradient path through the encoder)."""
+        """Return edge logits and scalar ``V(s)`` (full gradient path through the encoder).
+
+        If ``detach_value_features`` is True, only the value head backprops w.r.t. its input;
+        gradients from the value loss **do not** flow into the GAT encoder. Policy and entropy
+        terms still train the encoder via ``logits``. Use this in PPO/A2C when large MeV-scale
+        critic error would otherwise overwrite good policy features.
+        """
         logits, h = self.policy.forward_logits_and_h(data, capture=capture)
         h_pool = h.mean(dim=0)
-        v = self.value_head(h_pool)
+        src = h_pool.detach() if detach_value_features else h_pool
+        v = self.value_head(src)
         return logits, v.view(-1)[0]

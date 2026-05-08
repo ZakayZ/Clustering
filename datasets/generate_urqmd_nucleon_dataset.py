@@ -133,7 +133,6 @@ def _process_chunk(
     chunk_rsd: int,
 ) -> list[dict[str, Any]]:
     """One process: one ``RunManager``, one ``load_config``, then ``run(n)`` for ``n=len(indices)``."""
-    import numpy as np
 
     import colapy
 

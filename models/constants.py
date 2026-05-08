@@ -1,8 +1,6 @@
 """Shared numeric / typing constants for graph policy and environment."""
 
-from __future__ import annotations
-
-from typing import Literal
+import enum
 
 # Physics uses **MeV** internally (:func:`cluster_energy.partition_loss_numpy`, env rewards).
 # Use ``MEV_PER_GEV`` only to convert MeV → GeV for tqdm/readouts/plots (monitoring).
@@ -15,4 +13,10 @@ EDGE_PHYS_DIM = 23
 # GAT node x: scaled phase-space (7) + is_proton (1) = 8.
 GAT_NODE_IN_DIM = 8
 
-GraphKind = Literal["knn", "radius", "full"]
+
+class GraphKind(enum.StrEnum):
+    """Graph topology tag (string values: ``knn``, ``radius``, ``full``)."""
+
+    KNN = enum.auto()
+    RADIUS = enum.auto()
+    FULL = enum.auto()

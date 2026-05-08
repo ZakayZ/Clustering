@@ -1,29 +1,18 @@
 """REINFORCE (policy-gradient) training for affinity graph edge policies."""
 
-from __future__ import annotations
-
-import json
-from pathlib import Path
-from typing import Any, Callable
-
 import numpy as np
 import torch
 import torch.nn as nn
+
+from typing import Any, Callable
+
 from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 from tqdm.auto import tqdm
 
 from models import AffinityGraphEnv, GATAffinityPolicy, MEV_PER_GEV
 
-from .utils import (
-    RLActionMode,
-    deterministic_eval_mean,
-    EventSampler,
-    _policy_grad_norm_by_prefix,
-    _summarize_supervised_capture,
-    _tensor_stats_f64,
-    _total_grad_norm,
-)
+from .utils import RLActionMode, EventSampler, evaluate_validation_deterministic_policy
 
 
 def collect_rollout(
@@ -34,51 +23,32 @@ def collect_rollout(
     isp: np.ndarray,
     *,
     action_mode: RLActionMode = "bernoulli",
-    with_det_eval: bool = False,
 ) -> dict[str, Any]:
     obs = env.reset(pos, mom, isp)
     edge_logits = policy(obs)
     dist = torch.distributions.Bernoulli(logits=edge_logits)
     if action_mode == "threshold":
-        a = (torch.sigmoid(edge_logits) > 0.5).float()
+        edge_actions = (torch.sigmoid(edge_logits) > 0.5).float()
     else:
-        a = dist.sample()
-    ent = dist.entropy().mean()
-    loss, labs = env.physics_for_edge_mask(a)
-    l_base = float(env._baseline_loss)
-    r = -loss
-    out: dict[str, Any] = {
+        edge_actions = dist.sample()
+    mean_edge_entropy = dist.entropy().mean()
+    partition_loss, cluster_labels = env.physics_for_edge_mask(edge_actions)
+    baseline_loss = float(env._baseline_loss)
+    reward = -partition_loss
+    return {
         "obs": obs,
-        "action": a,
-        "reward": r,
-        "partition_loss": loss,
-        "baseline_loss": l_base,
-        "edge_entropy": ent,
-        "n_clusters": int(len(np.unique(labs))),
+        "action": edge_actions,
+        "reward": reward,
+        "partition_loss": partition_loss,
+        "baseline_loss": baseline_loss,
+        "edge_entropy": mean_edge_entropy,
+        "n_clusters": int(len(np.unique(cluster_labels))),
         "action_mode": action_mode,
         "event_pos": np.asarray(pos, dtype=np.float64, copy=True),
         "event_mom": np.asarray(mom, dtype=np.float64, copy=True),
         "event_isp": np.asarray(isp, copy=True),
     }
-    if with_det_eval:
-        if action_mode == "threshold":
-            out["reward_det"] = float(r)
-            out["partition_loss_det"] = float(loss)
-            out["gap_det"] = float(loss - l_base)
-            fm = float(a.mean().item())
-            out["frac_edges_on_stoch"] = fm
-            out["frac_edges_on_det"] = fm
-        else:
-            with torch.no_grad():
-                a_det = (torch.sigmoid(edge_logits) > 0.5).float()
-                loss_det, _ = env.physics_for_edge_mask(a_det)
-            l_det = float(loss_det)
-            out["reward_det"] = float(-l_det)
-            out["partition_loss_det"] = l_det
-            out["gap_det"] = float(l_det - l_base)
-            out["frac_edges_on_stoch"] = float(a.mean().item())
-            out["frac_edges_on_det"] = float(a_det.mean().item())
-    return out
+
 
 def train_reinforce(
     policy: GATAffinityPolicy,
@@ -93,15 +63,15 @@ def train_reinforce(
     max_grad_norm: float = 0.5,
     on_update: Callable[[dict[str, list]], None] | None = None,
     policy_coef: float = 1.0,
-    diag_jsonl: Path | None = None,
-    diag_every: int = 1,
-    diag_det_rollouts: int = 32,
     rl_action_mode: RLActionMode = "bernoulli",
+    val_events: list[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+    n_val_steps: int = 1,
 ) -> dict[str, list]:
     """REINFORCE on edge Bernoulli actions.
 
     Each update uses batch-centered returns ``R_i - mean(R)`` over episodes collected
-    in that update (REINFORCE baseline with no cross-batch state).
+    in that update (REINFORCE baseline with no cross-batch state). Policy gradient uses
+    mean edge ``log π_θ(a_i|s)`` (same scaling as :func:`training.ppo.train_ppo` policy term).
 
     ``rl_action_mode``:
       - ``bernoulli``: sample masks (classic REINFORCE); can mismatch deterministic eval.
@@ -111,13 +81,11 @@ def train_reinforce(
 
     ``lr_scheduler`` is optional; if given, ``step()`` is called after each ``optimizer.step()``.
 
-    If ``diag_jsonl`` is set, append one JSON object per ``diag_every`` updates with
-    stochastic vs deterministic rewards (same-event), activation summaries, logits stats,
-    gradient norms, and a short deterministic eval sweep — used to diagnose train/eval mismatch.
+    Validation: non-empty ``val_events`` and ``n_val_steps > 0`` runs
+    :func:`training.utils.evaluate_validation_deterministic_policy` every ``n_val_steps``
+    updates on that list (slice ``val_events`` yourself to cap size). Use ``n_val_steps <= 0``
+    to disable.
     """
-    opt = optimizer
-    diag_path = Path(diag_jsonl) if diag_jsonl is not None else None
-    diag_f = diag_path.open("a", encoding="utf-8") if diag_path is not None else None
     history: dict[str, list] = {
         "episode_return": [],
         "partition_loss": [],
@@ -128,179 +96,125 @@ def train_reinforce(
         "n_clusters": [],
         "lr": [],
     }
+    val_cfg = (
+        val_events is not None
+        and len(val_events) > 0
+        and int(n_val_steps) > 0
+    )
+    if val_cfg:
+        history["val_step"] = []
+        for key in (
+            "val_n_events",
+            "val_mean_partition_loss_mev",
+            "val_mean_baseline_loss_mev",
+            "val_mean_n_clusters",
+        ):
+            history[key] = []
     pbar = tqdm(range(n_updates), desc="REINFORCE", miniters=1, mininterval=0.0, dynamic_ncols=True)
-    try:
-        for u in pbar:
-            log_diag = diag_f is not None and diag_every > 0 and (u % diag_every == 0)
-            ep_returns: list[float] = []
-            part_losses: list[float] = []
-            base_losses: list[float] = []
-            n_clust: list[int] = []
-            batch_obs: list[Data] = []
-            batch_act: list[torch.Tensor] = []
-            rew_det_list: list[float] = []
-            gap_det_list: list[float] = []
-            fstoch_list: list[float] = []
-            fdet_list: list[float] = []
+    for u in pbar:
+        episode_returns: list[float] = []
+        partition_losses: list[float] = []
+        baseline_losses: list[float] = []
+        cluster_counts: list[int] = []
+        batch_observations: list[Data] = []
+        batch_actions: list[torch.Tensor] = []
 
-            for _ in range(episodes_per_update):
-                pos, mom, isp = event_sampler()
-                ep = collect_rollout(
-                    env,
-                    policy,
-                    pos,
-                    mom,
-                    isp,
-                    action_mode=rl_action_mode,
-                    with_det_eval=log_diag,
+        for _ in range(episodes_per_update):
+            pos, mom, isp = event_sampler()
+            ep = collect_rollout(
+                env,
+                policy,
+                pos,
+                mom,
+                isp,
+                action_mode=rl_action_mode,
+            )
+            episode_returns.append(float(ep["reward"]))
+            partition_losses.append(float(ep["partition_loss"]))
+            baseline_losses.append(float(ep["baseline_loss"]))
+            cluster_counts.append(ep["n_clusters"])
+            batch_observations.append(ep["obs"])
+            batch_actions.append(ep["action"])
+
+        batch_mean_return = float(np.mean(episode_returns)) if episode_returns else 0.0
+        history["return_baseline"].append(batch_mean_return)
+
+        policy.train()
+        optimizer.zero_grad()
+        policy_loss_sum = entropy_sum = 0.0
+        batch_size = max(len(batch_observations), 1)
+        for i in range(len(batch_observations)):
+            obs = batch_observations[i]
+            logits = policy(obs)
+            dist = torch.distributions.Bernoulli(logits=logits)
+            stored_actions = batch_actions[i]
+            mean_log_prob = dist.log_prob(stored_actions).mean()
+            mean_entropy = dist.entropy().mean()
+            episode_return = episode_returns[i]
+            centered_return = torch.tensor(
+                episode_return - batch_mean_return, dtype=torch.float32
+            )
+            policy_loss_term = -(mean_log_prob * centered_return)
+            combined_loss = (policy_coef * policy_loss_term - ent_coef * mean_entropy) / batch_size
+            combined_loss.backward()
+            policy_loss_sum += policy_loss_term.item()
+            entropy_sum += mean_entropy.item()
+        nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+
+        optimizer.step()
+        if lr_scheduler is not None:
+            lr_scheduler.step()
+        history["lr"].append(float(optimizer.param_groups[0]["lr"]))
+
+        if val_cfg and u % int(n_val_steps) == 0:
+            validation_metrics = evaluate_validation_deterministic_policy(policy, env, val_events)
+            if validation_metrics:
+                history["val_step"].append(int(u))
+                for key in (
+                    "val_n_events",
+                    "val_mean_partition_loss_mev",
+                    "val_mean_baseline_loss_mev",
+                    "val_mean_n_clusters",
+                ):
+                    history[key].append(validation_metrics[key])
+                tqdm.write(
+                    f"[val] update={u} L_pos={validation_metrics['val_mean_partition_loss_mev']:.4g} "
+                    f"L_base={validation_metrics['val_mean_baseline_loss_mev']:.4g} "
+                    f"n={int(validation_metrics['val_n_events'])}"
                 )
-                ep_returns.append(float(ep["reward"]))
-                part_losses.append(float(ep["partition_loss"]))
-                base_losses.append(float(ep["baseline_loss"]))
-                n_clust.append(ep["n_clusters"])
-                batch_obs.append(ep["obs"])
-                batch_act.append(ep["action"])
-                if log_diag:
-                    rew_det_list.append(float(ep["reward_det"]))
-                    gap_det_list.append(float(ep["gap_det"]))
-                    fstoch_list.append(float(ep["frac_edges_on_stoch"]))
-                    fdet_list.append(float(ep["frac_edges_on_det"]))
 
-            mean_r = float(np.mean(ep_returns)) if ep_returns else 0.0
-            history["return_baseline"].append(mean_r)
+        if episode_returns:
+            history["episode_return"].append(float(np.mean(episode_returns)))
+        if partition_losses:
+            history["partition_loss"].append(float(np.mean(partition_losses)))
+        if baseline_losses and all(np.isfinite(baseline_losses)):
+            history["baseline_loss"].append(float(np.mean(baseline_losses)))
+        if cluster_counts:
+            history["n_clusters"].append(float(np.mean(cluster_counts)))
+        history["policy_loss"].append(policy_loss_sum / batch_size)
+        history["edge_entropy"].append(entropy_sum / batch_size)
 
-            policy.train()
-            opt.zero_grad()
-            pol_acc = ent_acc = 0.0
-            n_b = max(len(batch_obs), 1)
-            adv_list = [float(ep_returns[i] - mean_r) for i in range(len(batch_obs))]
-            for i in range(len(batch_obs)):
-                obs = batch_obs[i]
-                logits = policy(obs)
-                dist = torch.distributions.Bernoulli(logits=logits)
-                a = batch_act[i]
-                logp = dist.log_prob(a).mean()
-                ent = dist.entropy().mean()
-                g = ep_returns[i]
-                adv_t = torch.tensor(g - mean_r, dtype=torch.float32)
-                pol_t = -(logp * adv_t)
-                loss_t = (policy_coef * pol_t - ent_coef * ent) / n_b
-                loss_t.backward()
-                pol_acc += pol_t.item()
-                ent_acc += ent.item()
-            nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
-
-            grad_norm_total = _total_grad_norm(list(policy.parameters()))
-            grad_by_pref = _policy_grad_norm_by_prefix(policy)
-            lr_before_step = float(opt.param_groups[0]["lr"])
-
-            if log_diag and diag_f is not None:
-                policy.eval()
-                cap: dict[str, Any] = {}
-                cap_sum: dict[str, Any]
-                logits_stats: dict[str, float]
-                sig_stats: dict[str, float]
-                if batch_obs:
-                    _ = policy(batch_obs[0], capture=cap)
-                    cap_sum = _summarize_supervised_capture(cap)
-                    with torch.no_grad():
-                        lo = policy(batch_obs[0])
-                        sig = torch.sigmoid(lo)
-                    logits_stats = _tensor_stats_f64(lo)
-                    sig_stats = _tensor_stats_f64(sig)
-                else:
-                    cap_sum = {}
-                    logits_stats = {}
-                    sig_stats = {}
-
-                G_det_sweep, L_det_sweep, gap_det_sweep = deterministic_eval_mean(
-                    policy,
-                    env,
-                    event_sampler,
-                    diag_det_rollouts,
-                )
-                policy.train()
-
-                R_stoch = float(np.mean(ep_returns)) if ep_returns else float("nan")
-                R_det_same = float(np.mean(rew_det_list)) if rew_det_list else float("nan")
-                diag_row = {
-                    "update": u,
-                    "lr": lr_before_step,
-                    "R_mean_stoch": R_stoch,
-                    "R_mean_det_same_event": R_det_same,
-                    "R_stoch_minus_R_det_same_event": R_stoch - R_det_same
-                    if np.isfinite(R_stoch) and np.isfinite(R_det_same)
-                    else None,
-                    "L_pol_mean_stoch": float(np.mean(part_losses)) if part_losses else None,
-                    "L_base_mean": float(np.mean(base_losses))
-                    if base_losses and all(np.isfinite(base_losses))
-                    else None,
-                    "gap_mean_det_same_event": float(np.mean(gap_det_list))
-                    if gap_det_list
-                    else None,
-                    "frac_edges_on_stoch_mean": float(np.mean(fstoch_list))
-                    if fstoch_list
-                    else None,
-                    "frac_edges_on_det_mean": float(np.mean(fdet_list))
-                    if fdet_list
-                    else None,
-                    "adv_mean": float(np.mean(adv_list)) if adv_list else None,
-                    "adv_std": float(np.std(adv_list)) if len(adv_list) > 1 else 0.0,
-                    "policy_loss_mean": float(pol_acc / n_b),
-                    "entropy_mean": float(ent_acc / n_b),
-                    "grad_norm_total": grad_norm_total,
-                    **grad_by_pref,
-                    "logits": logits_stats,
-                    "sigmoid": sig_stats,
-                    "capture": cap_sum,
-                    "det_eval_sweep_G_mean": G_det_sweep,
-                    "det_eval_sweep_L_pol_mean": L_det_sweep,
-                    "det_eval_sweep_gap_mean": gap_det_sweep,
-                    "note": (
-                        "Stochastic RL maximizes mean sampled-action return; "
-                        "det_* rows are threshold actions (train/eval mismatch if diverge)."
-                    ),
-                }
-                diag_f.write(json.dumps(diag_row, default=str) + "\n")
-                diag_f.flush()
-
-            opt.step()
-            if lr_scheduler is not None:
-                lr_scheduler.step()
-            history["lr"].append(float(opt.param_groups[0]["lr"]))
-
-            if ep_returns:
-                history["episode_return"].append(float(np.mean(ep_returns)))
-            if part_losses:
-                history["partition_loss"].append(float(np.mean(part_losses)))
-            if base_losses and all(np.isfinite(base_losses)):
-                history["baseline_loss"].append(float(np.mean(base_losses)))
-            if n_clust:
-                history["n_clusters"].append(float(np.mean(n_clust)))
-            history["policy_loss"].append(pol_acc / n_b)
-            history["edge_entropy"].append(ent_acc / n_b)
-
-            pf: dict[str, float] = {
-                "pi": float(pol_acc / n_b),
-                "H": float(ent_acc / n_b),
-                "lr": float(opt.param_groups[0]["lr"]),
-                "Rmean": mean_r / MEV_PER_GEV,
-            }
-            if ep_returns:
-                pf["G"] = float(np.mean(ep_returns)) / MEV_PER_GEV
-            if part_losses:
-                pf["L_pol"] = float(np.mean(part_losses)) / MEV_PER_GEV
-            if base_losses and all(np.isfinite(base_losses)):
-                pf["L_base"] = float(np.mean(base_losses)) / MEV_PER_GEV
-            if n_clust:
-                pf["n_cl"] = float(np.mean(n_clust))
-            pbar.set_postfix(pf, refresh=True)
-            if on_update is not None:
-                on_update(history)
-    finally:
-        if diag_f is not None:
-            diag_f.close()
+        progress_metrics: dict[str, float] = {}
+        if partition_losses:
+            progress_metrics["partition_gev"] = (
+                float(np.mean(partition_losses)) / MEV_PER_GEV
+            )
+        if baseline_losses and all(np.isfinite(baseline_losses)):
+            progress_metrics["baseline_gev"] = (
+                float(np.mean(baseline_losses)) / MEV_PER_GEV
+            )
+        progress_metrics["policy_loss"] = float(policy_loss_sum / batch_size)
+        progress_metrics["entropy"] = float(entropy_sum / batch_size)
+        progress_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+        progress_metrics["mean_return_gev"] = batch_mean_return / MEV_PER_GEV
+        if episode_returns:
+            progress_metrics["mean_episode_return_gev"] = (
+                float(np.mean(episode_returns)) / MEV_PER_GEV
+            )
+        if cluster_counts:
+            progress_metrics["mean_clusters"] = float(np.mean(cluster_counts))
+        pbar.set_postfix(progress_metrics, refresh=True)
+        if on_update is not None:
+            on_update(history)
 
     return history
-
-
