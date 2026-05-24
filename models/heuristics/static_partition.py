@@ -1,5 +1,3 @@
-"""Baseline from precomputed partitions (e.g. heuristic pickle) for fast supervised targets."""
-
 import gzip
 import pickle
 
@@ -10,14 +8,7 @@ import numpy as np
 
 from models.heuristics.utils import EventBaseline, make_event_baseline
 
-
 class StaticPartitionBaseline:
-    """O(1) lookup :class:`EventBaseline` aligned with dataset event indices.
-
-    Pass ``event_index`` on :meth:`__call__` (``AffinityGraphEnv.reset`` does this) or set the
-    cursor with :meth:`prepare_event` before calling without ``event_index``.
-    """
-
     def __init__(self, cache: list[EventBaseline]) -> None:
         self._cache = cache
         self._current_index: int = 0
@@ -49,7 +40,6 @@ class StaticPartitionBaseline:
         teacher_pkl_gz: Path | str,
         events: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
     ) -> Self:
-        """Load ``*.pkl.gz`` from :mod:`scripts.run_heuristics_full_dataset` and align with ``events``."""
         path = Path(teacher_pkl_gz)
         with gzip.open(path, "rb") as f:
             bundle: dict[str, Any] = pickle.load(f)

@@ -1,7 +1,3 @@
-"""Radius graph in cut-normalized 6-D (r, k) space."""
-
-from __future__ import annotations
-
 import numpy as np
 import torch
 import torch_geometric.nn as pyg_nn
@@ -11,14 +7,7 @@ from torch_geometric.utils import to_undirected
 from models.graph.base import GraphBuilder
 from models.graph.utils import policy_edges_from_directed
 
-
 class RadiusGraphBuilder(GraphBuilder):
-    """Radius edges on ``concat(r3, k3)`` in Euclidean 6-D.
-
-    ``r3``, ``k3`` must already be in cut units (e.g. ``r / R_cut``, ``k / K_cut``); see
-    :meth:`models.env.AffinityGraphEnv.reset`.
-    """
-
     def __init__(
         self,
         radius_norm: float = 1.2,

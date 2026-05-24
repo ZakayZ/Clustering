@@ -1,7 +1,3 @@
-"""COLA / UrQMD event extraction and dataset loading."""
-
-from __future__ import annotations
-
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
@@ -12,12 +8,7 @@ from .generate_urqmd_nucleon_dataset import load_dataset_pickle
 
 import colapy
 
-
 def extract_nucleons_numpy(particles: list[Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert COLA particles to numpy arrays.
-
-    ``pos`` is ``(N, 4)``: ``(t, x, y, z)`` with ``t`` in fm/c and ``x,y,z`` in fm. ``mom`` is ``(E, px, py, pz)`` in MeV/c.
-    """
     pos, mom, is_proton = [], [], []
     for p in particles:
         if p.pdg_code == 2212:
@@ -32,10 +23,7 @@ def extract_nucleons_numpy(particles: list[Any]) -> tuple[np.ndarray, np.ndarray
         return np.zeros((0, 4), np.float64), np.zeros((0, 4), np.float64), np.zeros((0,), bool)
     return np.asarray(pos, np.float64), np.asarray(mom, np.float64), np.asarray(is_proton, bool)
 
-
 def try_make_urqmd_event_generator() -> Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """COLA / UrQMD: one event → ``(pos, mom, is_proton)`` numpy."""
-
     class W(colapy.WriterBase):
         events: list[Any] = []
 
@@ -64,7 +52,7 @@ def try_make_urqmd_event_generator() -> Callable[[], tuple[np.ndarray, np.ndarra
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete_on_close=False) as tmp:
             tmp.write(config)
             tmp.close()
-            rm = colapy.RunManager().load_module("COLA-Py").load_module("COLA_UrQMD").load_config(tmp.name)
+            rm = colapy.RunManager().load_module("COLA-Py").load_module("COLA_UrQMD").load_config(file=tmp.name)
             rm.run(1)
             Path("input_file").unlink(missing_ok=True)
         if not W.events:
@@ -74,8 +62,6 @@ def try_make_urqmd_event_generator() -> Callable[[], tuple[np.ndarray, np.ndarra
 
     return gen_one
 
-
 def load_valid_events_from_pkl(pkl: Path) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Load valid events from generated dataset pickle."""
     bundle = load_dataset_pickle(pkl)
     return [(e["pos"], e["mom"], e["is_proton"]) for e in bundle["events"] if e]

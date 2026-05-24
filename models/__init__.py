@@ -1,5 +1,3 @@
-"""Policy, graph env, baseline, and data helpers for affinity clustering."""
-
 from models.heuristics.annealing import (
     CCLAnnealParams,
     CCLAnnealRefinementModel,

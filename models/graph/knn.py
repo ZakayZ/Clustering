@@ -1,7 +1,3 @@
-"""kNN graph topology in cut-normalized mixed (r, k) space."""
-
-from __future__ import annotations
-
 import numpy as np
 import torch
 from torch_geometric.data import Data
@@ -10,10 +6,7 @@ from torch_geometric.transforms import KNNGraph
 from models.graph.base import GraphBuilder
 from models.graph.utils import policy_edges_from_directed
 
-
 class KNNGraphBuilder(GraphBuilder):
-    """Directed kNN in 6-D ``[r3, k3]`` then symmetrized (inputs are cut-normalized by the env)."""
-
     def __init__(
         self,
         k: int = 6,

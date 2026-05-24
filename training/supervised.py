@@ -1,13 +1,8 @@
-"""Supervised edge-BCE training against the spatial–momentum baseline (warm-start / standalone).
-
-Per-step ``pretrain_partition_loss`` uses :meth:`~models.env.AffinityGraphEnv.physics_for_edge_mask`,
-so optional ``cluster_dissolve_energy_threshold_mev`` on the env affects logged physics loss.
-"""
-
 import numpy as np
 import torch
 import torch.nn as nn
 
+from pathlib import Path
 from typing import Callable
 
 from torch.optim.lr_scheduler import LRScheduler
@@ -16,12 +11,13 @@ from tqdm.auto import tqdm
 from models import AffinityGraphEnv, GATAffinityPolicy, MEV_PER_GEV
 
 from .utils import (
+    BestValPhysicsCheckpoint,
     EventSampler,
     baseline_edge_targets,
     evaluate_validation_deterministic_policy,
+    format_validation_console_line,
     weighted_bce_with_logits,
 )
-
 
 def train_supervised_edges(
     policy: GATAffinityPolicy,
@@ -42,16 +38,8 @@ def train_supervised_edges(
     lr_scheduler: LRScheduler | None = None,
     val_events: list[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
     n_val_steps: int = 1,
+    best_val_checkpoint_path: str | Path | None = None,
 ) -> dict[str, list]:
-    """BCE on edge logits against spatial–momentum baseline edge targets (warm-start / standalone).
-
-    If ``lr_scheduler`` is set, ``lr_scheduler.step()`` runs after each ``optimizer.step()``.
-
-    Validation: non-empty ``val_events`` and ``n_val_steps > 0`` runs
-    :func:`training.utils.evaluate_validation_deterministic_policy` every ``n_val_steps`` training
-    steps (slice ``val_events`` yourself). Only deterministic-mask physics metrics are recorded.
-    Use ``n_val_steps <= 0`` to disable.
-    """
     policy_optimizer = optimizer or torch.optim.Adam(policy.parameters(), lr=lr)
     history: dict[str, list] = {
         "supervised_bce": [],
@@ -75,6 +63,11 @@ def train_supervised_edges(
         history["val_mean_baseline_loss_mev"] = []
         history["val_mean_n_clusters"] = []
         history["val_n_events"] = []
+    val_ckpt: BestValPhysicsCheckpoint | None = (
+        BestValPhysicsCheckpoint(best_val_checkpoint_path)
+        if best_val_checkpoint_path is not None
+        else None
+    )
     policy.train()
     pbar_sup = tqdm(
         range(steps),
@@ -195,10 +188,20 @@ def train_supervised_edges(
                 )
                 history["val_n_events"].append(validation_metrics["val_n_events"])
                 tqdm.write(
-                    f"[val] step={step_ix} L_pos={validation_metrics['val_mean_partition_loss_mev']:.4g} "
-                    f"L_base={validation_metrics['val_mean_baseline_loss_mev']:.4g} "
-                    f"n={int(validation_metrics['val_n_events'])}"
+                    format_validation_console_line(
+                        iter_key="step",
+                        iter_value=int(step_ix),
+                        partition_loss_mev=validation_metrics["val_mean_partition_loss_mev"],
+                        baseline_loss_mev=validation_metrics["val_mean_baseline_loss_mev"],
+                        n_events=validation_metrics["val_n_events"],
+                    )
                 )
+                if val_ckpt is not None:
+                    val_ckpt.maybe_save(
+                        validation_metrics["val_mean_partition_loss_mev"],
+                        policy.state_dict(),
+                        extra={"algorithm": "supervised", "step": int(step_ix)},
+                    )
         if on_update is not None:
             on_update(history)
     return history

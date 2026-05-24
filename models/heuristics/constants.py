@@ -1,11 +1,3 @@
-"""Cut / phase-space scales for clustering heuristics.
-
-This package only depends on :mod:`cluster_energy` from outside ``heuristics``; scales live here
-rather than in :mod:`models.constants`.
-"""
-
-from __future__ import annotations
-
 MEV_PER_GEV = 1000.0
 
 R_CUT_FM = 7.0

@@ -1,9 +1,8 @@
-"""REINFORCE (policy-gradient) training for affinity graph edge policies."""
-
 import numpy as np
 import torch
 import torch.nn as nn
 
+from pathlib import Path
 from typing import Any, Callable
 
 from torch.optim.lr_scheduler import LRScheduler
@@ -12,8 +11,13 @@ from tqdm.auto import tqdm
 
 from models import AffinityGraphEnv, GATAffinityPolicy, MEV_PER_GEV
 
-from .utils import RLActionMode, EventSampler, evaluate_validation_deterministic_policy
-
+from .utils import (
+    RLActionMode,
+    BestValPhysicsCheckpoint,
+    EventSampler,
+    evaluate_validation_deterministic_policy,
+    format_validation_console_line,
+)
 
 def collect_rollout(
     env: AffinityGraphEnv,
@@ -49,7 +53,6 @@ def collect_rollout(
         "event_isp": np.asarray(isp, copy=True),
     }
 
-
 def train_reinforce(
     policy: GATAffinityPolicy,
     env: AffinityGraphEnv,
@@ -66,26 +69,8 @@ def train_reinforce(
     rl_action_mode: RLActionMode = "bernoulli",
     val_events: list[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
     n_val_steps: int = 1,
+    best_val_checkpoint_path: str | Path | None = None,
 ) -> dict[str, list]:
-    """REINFORCE on edge Bernoulli actions.
-
-    Each update uses batch-centered returns ``R_i - mean(R)`` over episodes collected
-    in that update (REINFORCE baseline with no cross-batch state). Policy gradient uses
-    mean edge ``log π_θ(a_i|s)`` (same scaling as :func:`training.ppo.train_ppo` policy term).
-
-    ``rl_action_mode``:
-      - ``bernoulli``: sample masks (classic REINFORCE); can mismatch deterministic eval.
-      - ``threshold``: use ``sigmoid(logit) > 0.5`` masks for both reward and policy gradient
-        (log-prob of that threshold action under Bernoulli logits). Aligns training with
-        deterministic deployment metrics.
-
-    ``lr_scheduler`` is optional; if given, ``step()`` is called after each ``optimizer.step()``.
-
-    Validation: non-empty ``val_events`` and ``n_val_steps > 0`` runs
-    :func:`training.utils.evaluate_validation_deterministic_policy` every ``n_val_steps``
-    updates on that list (slice ``val_events`` yourself to cap size). Use ``n_val_steps <= 0``
-    to disable.
-    """
     history: dict[str, list] = {
         "episode_return": [],
         "partition_loss": [],
@@ -110,6 +95,11 @@ def train_reinforce(
             "val_mean_n_clusters",
         ):
             history[key] = []
+    val_ckpt: BestValPhysicsCheckpoint | None = (
+        BestValPhysicsCheckpoint(best_val_checkpoint_path)
+        if best_val_checkpoint_path is not None
+        else None
+    )
     pbar = tqdm(range(n_updates), desc="REINFORCE", miniters=1, mininterval=0.0, dynamic_ncols=True)
     for u in pbar:
         episode_returns: list[float] = []
@@ -178,10 +168,20 @@ def train_reinforce(
                 ):
                     history[key].append(validation_metrics[key])
                 tqdm.write(
-                    f"[val] update={u} L_pos={validation_metrics['val_mean_partition_loss_mev']:.4g} "
-                    f"L_base={validation_metrics['val_mean_baseline_loss_mev']:.4g} "
-                    f"n={int(validation_metrics['val_n_events'])}"
+                    format_validation_console_line(
+                        iter_key="update",
+                        iter_value=int(u),
+                        partition_loss_mev=validation_metrics["val_mean_partition_loss_mev"],
+                        baseline_loss_mev=validation_metrics["val_mean_baseline_loss_mev"],
+                        n_events=validation_metrics["val_n_events"],
+                    )
                 )
+                if val_ckpt is not None:
+                    val_ckpt.maybe_save(
+                        validation_metrics["val_mean_partition_loss_mev"],
+                        policy.state_dict(),
+                        extra={"algorithm": "reinforce", "update": int(u)},
+                    )
 
         if episode_returns:
             history["episode_return"].append(float(np.mean(episode_returns)))

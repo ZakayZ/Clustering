@@ -1,7 +1,3 @@
-"""Fully connected (ordered pairs) graph topology."""
-
-from __future__ import annotations
-
 import numpy as np
 import torch
 from torch_geometric.data import Data
@@ -10,10 +6,7 @@ from torch_geometric.utils import dense_to_sparse
 from models.graph.base import GraphBuilder
 from models.graph.utils import policy_edges_from_directed
 
-
 class FullGraphBuilder(GraphBuilder):
-    """All ordered pairs ``i → j``, ``i ≠ j`` (bidirectional) for full message passing."""
-
     def build(self, r3: np.ndarray, _: np.ndarray) -> Data:
         n = int(r3.shape[0])
         adj = torch.ones((n, n), dtype=torch.float32)

@@ -1,9 +1,8 @@
-"""Advantage actor–critic (A2C-style) training for affinity graph edge policies."""
-
 import numpy as np
 import torch
 import torch.nn as nn
 
+from pathlib import Path
 from typing import Any, Callable
 
 from torch.optim.lr_scheduler import LRScheduler
@@ -12,10 +11,15 @@ from tqdm.auto import tqdm
 
 from models import AffinityGraphEnv, GATAffinityActorCritic, MEV_PER_GEV
 
-from .utils import RLActionMode, ValueWarmupConfig, evaluate_validation_deterministic_policy
+from .utils import (
+    RLActionMode,
+    BestValPhysicsCheckpoint,
+    ValueWarmupConfig,
+    evaluate_validation_deterministic_policy,
+    format_validation_console_line,
+)
 
 type EventSampler = Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]]
-
 
 def collect_rollout_ac(
     env: AffinityGraphEnv,
@@ -26,7 +30,6 @@ def collect_rollout_ac(
     *,
     action_mode: RLActionMode = "bernoulli",
 ) -> dict[str, Any]:
-    """Actor–critic rollout: stores ``value`` = ``V(s)`` from :class:`GATAffinityActorCritic`."""
     obs = env.reset(pos, mom, isp)
     edge_logits, state_value = ac(obs)
     dist = torch.distributions.Bernoulli(logits=edge_logits)
@@ -53,7 +56,6 @@ def collect_rollout_ac(
         "event_isp": np.asarray(isp, copy=True),
     }
 
-
 def warm_start_value_head(
     ac: GATAffinityActorCritic,
     env: AffinityGraphEnv,
@@ -65,11 +67,6 @@ def warm_start_value_head(
     max_grad_norm: float = 1.0,
     rl_action_mode: RLActionMode = "threshold",
 ) -> None:
-    """After supervised warm-start, fit only ``value_head`` to Monte Carlo returns (policy frozen).
-
-    The critic is randomly initialized while edge logits are already trained; without this,
-    ``R - V(s)`` advantages are dominated by critic error and destabilize actor–critic updates.
-    """
     value_optimizer = torch.optim.Adam(ac.value_head.parameters(), lr=float(lr))
     for p in ac.policy.parameters():
         p.requires_grad_(False)
@@ -101,7 +98,6 @@ def warm_start_value_head(
             p.requires_grad_(True)
         ac.train()
 
-
 def train_actor_critic(
     ac: GATAffinityActorCritic,
     env: AffinityGraphEnv,
@@ -122,21 +118,8 @@ def train_actor_critic(
     detach_value_features: bool = True,
     val_events: list[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
     n_val_steps: int = 1,
+    best_val_checkpoint_path: str | Path | None = None,
 ) -> dict[str, list]:
-    """Advantage actor–critic with batch-centered advantages ``R - V(s)`` (optional ``center_adv``).
-
-    Policy term uses mean edge ``log π_θ(a_i|s)`` (same scaling as :func:`training.ppo.train_ppo`).
-    Entropy bonus still uses mean edge entropy for comparability with tqdm diagnostics. Value target is
-    Monte Carlo return ``R`` per one-shot episode. See ``detach_value_features`` on
-    :class:`models.gat_actor_critic.GATAffinityActorCritic`. Gradient norms are clipped **separately**
-    for ``ac.policy`` and ``ac.value_head``.
-
-    Optional ``value_warmup`` with ``steps > 0`` runs :func:`warm_start_value_head` once at the start.
-    Pass ``None`` (default) to skip.
-
-    Validation: non-empty ``val_events`` and ``n_val_steps > 0`` evaluates ``ac.policy`` deterministically
-    every ``n_val_steps`` updates (slice ``val_events`` yourself). Use ``n_val_steps <= 0`` to disable.
-    """
     value_warmup_cfg = value_warmup or ValueWarmupConfig()
     if int(value_warmup_cfg.steps) > 0:
         warmup_episodes_per_step = (
@@ -181,6 +164,7 @@ def train_actor_critic(
             "val_mean_n_clusters",
         ):
             history[key] = []
+    val_ckpt: BestValPhysicsCheckpoint | None = best_val_checkpoint_path and BestValPhysicsCheckpoint(best_val_checkpoint_path)
     pbar = tqdm(range(n_updates), desc="A2C", miniters=1, mininterval=0.0, dynamic_ncols=True)
     for u in pbar:
         episode_returns: list[float] = []
@@ -268,10 +252,20 @@ def train_actor_critic(
                 ):
                     history[key].append(validation_metrics[key])
                 tqdm.write(
-                    f"[val] update={u} L_pos={validation_metrics['val_mean_partition_loss_mev']:.4g} "
-                    f"L_base={validation_metrics['val_mean_baseline_loss_mev']:.4g} "
-                    f"n={int(validation_metrics['val_n_events'])}"
+                    format_validation_console_line(
+                        iter_key="update",
+                        iter_value=int(u),
+                        partition_loss_mev=validation_metrics["val_mean_partition_loss_mev"],
+                        baseline_loss_mev=validation_metrics["val_mean_baseline_loss_mev"],
+                        n_events=validation_metrics["val_n_events"],
+                    )
                 )
+                if val_ckpt is not None:
+                    val_ckpt.maybe_save(
+                        validation_metrics["val_mean_partition_loss_mev"],
+                        ac.state_dict(),
+                        extra={"algorithm": "a2c", "update": int(u)},
+                    )
 
         if episode_returns:
             history["episode_return"].append(float(np.mean(episode_returns)))

@@ -1,7 +1,3 @@
-"""GAT policy for affinity edges."""
-
-from __future__ import annotations
-
 from typing import Any
 
 import torch
@@ -11,10 +7,7 @@ from torch_geometric.data import Data
 
 from models.constants import EDGE_PHYS_DIM
 
-
 class _MetaEdgeFeatureMLP(nn.Module):
-    """Maps MetaLayer's ``(src, dst, edge_attr)`` to a single tensor for the edge MLP."""
-
     def __init__(self, mlp: nn.Module) -> None:
         super().__init__()
         self.mlp = mlp
@@ -29,10 +22,7 @@ class _MetaEdgeFeatureMLP(nn.Module):
     ) -> torch.Tensor:
         return self.mlp(torch.cat([src, dst, edge_attr], dim=-1))
 
-
 class GATAffinityPolicy(nn.Module):
-    """GATv2 encoder + MetaLayer edge MLP; logits are one per undirected kNN edge (``policy_edge_idx``)."""
-
     MAX_VALUE: float = 100.0
 
     def __init__(
@@ -84,16 +74,10 @@ class GATAffinityPolicy(nn.Module):
             node_model=None,
             global_model=None,
         )
-        # Width of the last GAT stack (``n_heads * head_dim``); used by PPO value head on pooled ``h``.
         self.node_embed_dim: int = int(hidden)
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """Orthogonal init for linear layers; output layer scaled small for near-zero initial logits.
-
-        Orthogonal init (Saxe et al. 2013) keeps gradient norms stable across layers without
-        requiring LayerNorm. It is standard in PPO implementations and speeds up early convergence.
-        """
         for name, m in self.named_modules():
             if isinstance(m, nn.Linear):
                 gain = 0.01 if name.endswith(("lins.3", "lins.1")) else 1.0
@@ -104,10 +88,6 @@ class GATAffinityPolicy(nn.Module):
     def forward_logits_and_h(
         self, data: Data, *, capture: dict[str, Any] | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Policy edge logits and GAT node embeddings ``h`` (same forward as :meth:`forward`).
-
-        Used by :mod:`models.gat_actor_critic` for the value head on pooled ``h``.
-        """
         x = data.x
         ea = data.edge_attr
         if capture is not None:
@@ -143,14 +123,7 @@ class GATAffinityPolicy(nn.Module):
         logits, _ = self.forward_logits_and_h(data, capture=capture)
         return logits
 
-
 def init_policy_all_edges_off(policy: GATAffinityPolicy, logit_bias: float = -10.0) -> None:
-    """Make initial edge logits almost constant and negative so rollouts are ~all edges off.
-
-    Zeros the final linear weights so logits equal the bias (no dependence on GAT features);
-    bias defaults to ``-10`` (sigmoid ≈ 4.5e-5). Use for unsupervised REINFORCE cold starts.
-    """
-
     last = policy.edge_readout.edge_model.mlp.lins[-1]
     with torch.no_grad():
         last.weight.zero_()

@@ -1,5 +1,3 @@
-"""Dataset pickles and COLA/UrQMD → NumPy I/O."""
-
 from .data_io import (
     extract_nucleons_numpy,
     load_valid_events_from_pkl,

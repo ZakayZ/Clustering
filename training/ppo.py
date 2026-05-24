@@ -1,9 +1,8 @@
-"""Proximal Policy Optimization (PPO) for affinity graph edge policies."""
-
 import numpy as np
 import torch
 import torch.nn as nn
 
+from pathlib import Path
 from typing import Any, Callable
 
 from torch.optim.lr_scheduler import LRScheduler
@@ -12,10 +11,15 @@ from tqdm.auto import tqdm
 from models import AffinityGraphEnv, GATAffinityActorCritic, MEV_PER_GEV
 
 from .a2c import warm_start_value_head
-from .utils import RLActionMode, ValueWarmupConfig, evaluate_validation_deterministic_policy
+from .utils import (
+    RLActionMode,
+    BestValPhysicsCheckpoint,
+    ValueWarmupConfig,
+    evaluate_validation_deterministic_policy,
+    format_validation_console_line,
+)
 
 EventSampler = Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]]
-
 
 def collect_rollout_ppo(
     env: AffinityGraphEnv,
@@ -26,7 +30,6 @@ def collect_rollout_ppo(
     *,
     action_mode: RLActionMode = "bernoulli",
 ) -> dict[str, Any]:
-    """PPO rollout: ``value``, ``old_log_prob`` (mean edge log π_i(a_i)), plus diagnostics."""
     obs = env.reset(pos, mom, isp)
     edge_logits, state_value = ac(obs)
     dist = torch.distributions.Bernoulli(logits=edge_logits)
@@ -55,7 +58,6 @@ def collect_rollout_ppo(
         "event_isp": np.asarray(isp, copy=True),
     }
 
-
 def train_ppo(
     ac: GATAffinityActorCritic,
     env: AffinityGraphEnv,
@@ -79,25 +81,8 @@ def train_ppo(
     rl_action_mode: RLActionMode = "bernoulli",
     val_events: list[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
     n_val_steps: int = 1,
+    best_val_checkpoint_path: str | Path | None = None,
 ) -> dict[str, list]:
-    """Proximal Policy Optimization (Schulman et al.) on edge Bernoulli masks.
-
-    Each environment step is one full graph: sample all edge bits, observe terminal reward
-    ``R = -\\mathcal{L}_\\mathrm{pol}`` (MeV). Advantages are ``A = R - V(s)`` from rollout values
-    (Monte Carlo / one-step TD). Policy log-probs are **mean** over edges; the importance ratio
-    uses ``r = \\exp(N(\\overline{\\log\\pi_\\theta} - \\overline{\\log\\pi_{\\mathrm{old}}}))``
-    with ``N`` = number of policy edges (factorized Bernoulli). Each PPO epoch shuffles the rollout
-    buffer and applies one gradient step on the **full** batch (all ``episodes_per_update`` graphs).
-
-    ``lr_scheduler.step()`` runs **once per outer update** after PPO optimization.
-
-    Optional ``value_warmup`` with ``steps > 0`` runs :func:`training.a2c.warm_start_value_head`
-    once at the start so the critic matches MeV-scale returns before PPO updates. Pass ``None``
-    (default) to skip.
-
-    Validation: non-empty ``val_events`` and ``n_val_steps > 0`` evaluates ``ac.policy`` every
-    ``n_val_steps`` outer updates (slice ``val_events`` yourself). Use ``n_val_steps <= 0`` to disable.
-    """
     value_warmup_cfg = value_warmup or ValueWarmupConfig()
     if int(value_warmup_cfg.steps) > 0:
         warmup_episodes_per_step = (
@@ -144,6 +129,11 @@ def train_ppo(
             "val_mean_n_clusters",
         ):
             history[key] = []
+    val_ckpt: BestValPhysicsCheckpoint | None = (
+        BestValPhysicsCheckpoint(best_val_checkpoint_path)
+        if best_val_checkpoint_path is not None
+        else None
+    )
     pbar = tqdm(range(n_updates), desc="PPO", miniters=1, mininterval=0.0, dynamic_ncols=True)
     for u in pbar:
         buffer: list[dict[str, Any]] = []
@@ -269,10 +259,20 @@ def train_ppo(
                 ):
                     history[key].append(validation_metrics[key])
                 tqdm.write(
-                    f"[val] update={u} L_pos={validation_metrics['val_mean_partition_loss_mev']:.4g} "
-                    f"L_base={validation_metrics['val_mean_baseline_loss_mev']:.4g} "
-                    f"n={int(validation_metrics['val_n_events'])}"
+                    format_validation_console_line(
+                        iter_key="update",
+                        iter_value=int(u),
+                        partition_loss_mev=validation_metrics["val_mean_partition_loss_mev"],
+                        baseline_loss_mev=validation_metrics["val_mean_baseline_loss_mev"],
+                        n_events=validation_metrics["val_n_events"],
+                    )
                 )
+                if val_ckpt is not None:
+                    val_ckpt.maybe_save(
+                        validation_metrics["val_mean_partition_loss_mev"],
+                        ac.state_dict(),
+                        extra={"algorithm": "ppo", "update": int(u)},
+                    )
 
         surrogate_denominator = max(num_surrogate_terms, 1)
         if episode_returns:

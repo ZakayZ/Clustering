@@ -1,7 +1,3 @@
-"""Graph construction, connectivity helpers, and ``AffinityGraphEnv``."""
-
-from __future__ import annotations
-
 from collections import defaultdict
 
 import numpy as np
@@ -16,22 +12,18 @@ from models.graph import GraphBuilder
 from models.heuristics.constants import HBARC_MEV_FM, K_CUT_FM_INV, R_CUT_FM
 from models.heuristics.protocol import BaselineModel
 
-
 def labels_to_partition(labels: np.ndarray) -> list[list[int]]:
     by_lbl = defaultdict[int, list[int]](list)
     for i, lab in enumerate(labels.astype(int).tolist()):
         by_lbl[int(lab)].append(i)
     return [by_lbl[k] for k in sorted(by_lbl.keys())]
 
-
 def partition_to_labels(n: int, part: list[list[int]]) -> np.ndarray:
-    """Dense labels ``0 .. n_clusters-1`` from an explicit partition."""
     lab = np.zeros(int(n), dtype=np.int32)
     for ci, c in enumerate(part):
         for j in c:
             lab[int(j)] = int(ci)
     return lab
-
 
 def dissolve_unfavorable_clusters(
     pos: np.ndarray,
@@ -41,7 +33,6 @@ def dissolve_unfavorable_clusters(
     *,
     energy_threshold_mev: float,
 ) -> list[list[int]]:
-    """Split multi-nucleon clusters with ``total_energy >= threshold`` into singletons (MeV)."""
     cloud = NucleonCloud.from_numpy(pos, mom, isp)
     out: list[list[int]] = []
     thr = float(energy_threshold_mev)
@@ -58,17 +49,12 @@ def dissolve_unfavorable_clusters(
     out.sort(key=len, reverse=True)
     return out
 
-
 def cluster_labels_from_edges(
     n: int,
     edge_i: np.ndarray,
     edge_j: np.ndarray,
     edge_on: np.ndarray,
 ) -> np.ndarray:
-    """Connected components on the subgraph of **on** edges (labels ``0 .. n_comp-1``).
-
-    Uses ``scipy.sparse.csgraph.connected_components`` (CSR adjacency, undirected).
-    """
     on = np.asarray(edge_on, dtype=bool).reshape(-1)
     ei = np.asarray(edge_i, dtype=np.int64)[on]
     ej = np.asarray(edge_j, dtype=np.int64)[on]
@@ -80,29 +66,7 @@ def cluster_labels_from_edges(
     )
     return labels.astype(np.int32, copy=False)
 
-
 class AffinityGraphEnv:
-    """``reset`` stores ``mom``, ``isp`` as given and normalizes ``pos`` to ``(N, 4)`` ``(t,x,y,z)``.
-
-    If ``pos`` is ``(N, 3)`` spatial fm only, a column of zeros is prepended as coordinate time.
-
-    ``reset`` fills ``_baseline_node_labels`` / ``_baseline_loss`` from the required
-    :class:`~models.heuristics.protocol.BaselineModel` (e.g.
-    :class:`~models.heuristics.coalescence.CoalescenceHeuristicModel` with cut-like params).
-    Optional ``event_index`` is forwarded to the baseline so indexed caches stay aligned with data order.
-
-    Graph topology comes from a :class:`~models.graph.GraphBuilder` (kNN / radius / full).
-    Before topology, ``reset`` converts spatial ``r3`` (fm) and wavevector ``k3`` (fm^-1)
-    to cut units using ``dr_cut_scale_fm`` / ``dk_cut_scale_fm_inv``, then passes those arrays to
-    the builder (so builders never divide by ``R_CUT``/``K_CUT`` themselves).
-    Node and edge features use ``feat_scale_*`` and cut scales below (defaults match the prior
-    standalone config dataclass that was merged into this constructor).
-
-    The returned ``Data`` has node features ``x``, ``edge_index`` / ``edge_attr`` from the builder,
-    plus ``edge_pair_*`` and ``policy_edge_idx`` for the undirected policy edge list (``src < dst``).
-
-    After ``reset``, ``graph`` is the single ``Data`` passed to the policy."""
-
     def __init__(
         self,
         graph_builder: GraphBuilder,
@@ -168,27 +132,25 @@ class AffinityGraphEnv:
         k3_cut = np.asarray(k3, dtype=np.float64) / sdk
         self.graph = self._graph_builder.build(r3_cut, k3_cut)
 
-        # Scaled phase-space for nodes & edges (t dropped — always 0 for 3-D datasets).
         phase_space = np.concatenate(
             [r3 / sr, e / se, k3 / sk],
             axis=1,
             dtype=np.float32,
-        )  # shape (N, 7)
+        )
         self.graph.x = torch.from_numpy(np.concatenate(
             [phase_space, is_proton[:, None]],
             axis=1,
             dtype=np.float32,
-        ))  # shape (N, 8)
+        ))
         phase_space_t = torch.from_numpy(phase_space)
         i, j = self.graph.edge_index
         delta = phase_space_t[i] - phase_space_t[j]
-        # |Δr|, |Δk| in cut units (= 1 at baseline boundary): cols 0:3 = Δ(r/sr), 4:7 = Δ(k/sk).
         dr_cut = delta[:, 0:3].norm(dim=1, keepdim=True) * (sr / sdr)
         dk_cut = delta[:, 4:7].norm(dim=1, keepdim=True) * (sk / sdk)
         self.graph.edge_attr = torch.cat(
             [delta, phase_space_t[i], phase_space_t[j], dr_cut, dk_cut],
             dim=1,
-        )  # shape (E_dir, 23)
+        )
         bl = self.baseline(self.pos, self.mom, self.isp, event_index=event_index)
         self._baseline_node_labels = bl.node_labels.astype(np.int32)
         self._baseline_loss = float(bl.loss)

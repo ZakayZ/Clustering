@@ -1,12 +1,3 @@
-"""Spatial–momentum cut graph, partitions, and :class:`CoalescenceHeuristicModel`.
-
-The **cut baseline** (lab ``|Δr|`` + ``|Δk|`` gates, momentum always on, no dissolve) is
-:class:`CoalescenceHeuristicModel` with default :class:`CoalescenceBaselineParams` — same graph as
-:func:`baseline_clusters_numpy` on a full event.
-"""
-
-from __future__ import annotations
-
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -20,26 +11,21 @@ from models.heuristics.constants import HBARC_MEV_FM, Q_CUT_MEVC, R_CUT_FM
 from models.heuristics.utils import EventBaseline, make_event_baseline
 from models.heuristics.annealing import CCLAnnealParams
 
-
-
 def _pos3_stack(pos: np.ndarray) -> np.ndarray:
     p = np.asarray(pos, dtype=np.float64)
     return p[:, 1:4] if p.shape[-1] == 4 else p
-
 
 def _components_to_partition(
     idx: np.ndarray,
     n_local: int,
     labels: np.ndarray,
 ) -> list[list[int]]:
-    """Map connected-component labels on local 0..n_local-1 to global nucleon indices."""
     by: dict[int, list[int]] = defaultdict(list)
     for k in range(n_local):
         by[int(labels[k])].append(int(idx[k]))
     comps = [sorted(by[g]) for g in sorted(by.keys())]
     comps.sort(key=len, reverse=True)
     return comps
-
 
 def _cut_adjacency_edges(
     pos3: np.ndarray,
@@ -49,7 +35,6 @@ def _cut_adjacency_edges(
     use_momentum_gate: bool,
     q_cut_momentum: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return undirected CSR edge list (both directions) for pairs passing the gates."""
     n = int(pos3.shape[0])
     if n <= 1:
         return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
@@ -71,7 +56,6 @@ def _cut_adjacency_edges(
     ej = np.concatenate([ej0, ei0])
     return ei.astype(np.int64), ej.astype(np.int64)
 
-
 def baseline_clusters_numpy(
     pos: np.ndarray,
     mom: np.ndarray,
@@ -79,14 +63,6 @@ def baseline_clusters_numpy(
     r_cut_fm: float,
     q_cut_momentum: float,
 ) -> list[list[int]]:
-    """Cut-based clusters: neighbors if ``|Δr| < r_cut`` and ``|Δk| < k_cut``.
-
-    ``pos`` is ``(N, 3)`` or ``(N, 4)`` (only spatial columns are used).
-    ``mom`` is ``(N, 4)`` with ``(E, px, py, pz)`` in **MeV/c**;
-    the cut uses ``k = p_spatial / ħc`` (fm⁻¹).
-
-    Uses NumPy broadcast + ``scipy.sparse.csgraph.connected_components``.
-    """
     pos = np.asarray(pos, dtype=np.float64)
     pos3 = _pos3_stack(pos)
     idx = np.asarray(indices, dtype=np.int64)
@@ -113,7 +89,6 @@ def baseline_clusters_numpy(
     _, lab = connected_components(graph, directed=False, return_labels=True)
     return _components_to_partition(idx, n, lab)
 
-
 def fast_coalescence_partition(
     pos: np.ndarray,
     mom: np.ndarray,
@@ -125,7 +100,6 @@ def fast_coalescence_partition(
     drop_unfavorable_clusters: bool = False,
     dissolve_energy_threshold: float = 0.0,
 ) -> list[list[int]]:
-    """Fast surrogate: same graph builder as cut with configurable gates + optional UrQMD dissolve."""
     pos = np.asarray(pos, dtype=np.float64)
     mom = np.asarray(mom, dtype=np.float64)
     isp = np.asarray(is_proton, dtype=bool)
@@ -168,18 +142,8 @@ def fast_coalescence_partition(
     out.sort(key=len, reverse=True)
     return out
 
-
 @dataclass(frozen=True)
 class CoalescenceBaselineParams:
-    """Hyperparameters for :class:`CoalescenceHeuristicModel`.
-
-    **Defaults** (``use_momentum_gate=True``, ``drop_unfavorable_clusters=False``) match the
-    former **cut** baseline on full events — same graph as :func:`baseline_clusters_numpy`.
-
-    Other settings turn off the momentum gate and/or dissolve clusters via
-    :func:`~cluster_energy.cluster_energy` ``total_energy``.
-    """
-
     radius_fm: float = R_CUT_FM
     use_momentum_gate: bool = True
     q_cut_momentum: float = Q_CUT_MEVC
@@ -187,11 +151,8 @@ class CoalescenceBaselineParams:
     dissolve_energy_threshold: float = 0.0
     rng_seed: int = 0
 
-
 @dataclass
 class CoalescenceHeuristicModel:
-    """Vector cut graph + optional UrQMD dissolve (same as legacy ``method='coalescence'`` / cut)."""
-
     params: CoalescenceBaselineParams = field(default_factory=CoalescenceBaselineParams)
 
     def __call__(
@@ -215,9 +176,4 @@ class CoalescenceHeuristicModel:
         )
         return make_event_baseline(pos, mom, is_proton, part_b)
 
-
-#: Back-compat alias — same as :class:`~models.heuristics.annealing.CCLAnnealParams` **defaults**
-#: (tuned via ``scripts/search_coalescence_anneal.py``, see
-#: ``clustering/benchmarks/coalesce_ccl_anneal_search.json`` and
-#: ``coalesce_ccl_anneal_search_uncapped_40ev52trials.json`` for long uncapped search).
 RECOMMENDED_CCL_ANNEAL_FOR_DEFAULT_COALESCENCE = CCLAnnealParams()

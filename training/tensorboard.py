@@ -1,5 +1,3 @@
-"""TensorBoard scalar logging for training history dicts."""
-
 import shutil
 from pathlib import Path
 
@@ -9,21 +7,13 @@ from models import MEV_PER_GEV
 
 _GEV = float(MEV_PER_GEV)
 
-
 def clear_tensorboard_notebook_root(notebook_root: str | Path) -> None:
-    """Remove ``notebook_root`` and recreate it empty."""
     root = Path(notebook_root)
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
 
-
 class TensorBoardHistoryLogger:
-    """Writes latest scalars from ``history`` when ``on_update`` runs.
-
-    ``clean=True`` deletes ``log_dir`` before opening :class:`~torch.utils.tensorboard.writer.SummaryWriter`.
-    """
-
     def __init__(
         self,
         log_dir: str | Path,
@@ -62,7 +52,6 @@ class TensorBoardHistoryLogger:
         step: int,
         keys_tags_gev: list[tuple[str, str, bool]],
     ) -> None:
-        """Each triple is ``(history_key, tensorboard_tag_suffix, divide_by_GeV)``."""
         w = self._writer
         for hk, tag, as_gev in keys_tags_gev:
             seq = h.get(hk)

@@ -7,14 +7,7 @@ import masstable
 from scipy.special import erf
 from dataclasses import dataclass
 
-
-# -----------------------------------------------------------------------------
-# Nucleon cloud (replaces notebook ``Event`` / ``Particle``)
-# -----------------------------------------------------------------------------
-
-
 def _invariant_mass_rows(p4: np.ndarray) -> np.ndarray:
-    """Per-row invariant mass; ``p4`` shape ``(K, 4)`` with columns E, px, py, pz."""
     E = p4[:, 0]
     px = p4[:, 1]
     py = p4[:, 2]
@@ -23,17 +16,8 @@ def _invariant_mass_rows(p4: np.ndarray) -> np.ndarray:
     s = np.maximum(s, 0.0)
     return np.sqrt(s)
 
-
 @dataclass
 class NucleonCloud:
-    """
-    One event worth of nucleons: Cartesian positions, four-momenta, and species.
-
-    ``pos`` shape ``(N, 3)`` in fm. ``four_momentum`` shape ``(N, 4)`` with rows
-    ``(E, p_x, p_y, p_z)`` (energy and three-momentum in **MeV** and **MeV/c**).
-    ``is_proton`` shape ``(N,)`` (neutron if False).
-    """
-
     pos: np.ndarray
     four_momentum: np.ndarray
     is_proton: np.ndarray
@@ -64,11 +48,8 @@ class NucleonCloud:
         pos3 = pos[:, 1:4].copy() if pos.shape[1] == 4 else pos.copy()
         return cls(pos=pos3, four_momentum=mom, is_proton=is_proton)
 
-
 @dataclass(frozen=True)
 class ClusterEnergyResult:
-    """UrQMD-style cluster decomposition (energies in MeV)."""
-
     A: int
     Z: int
     internal_kinetic: float
@@ -76,36 +57,24 @@ class ClusterEnergyResult:
     binding_prior: float
     total_energy: float
 
-
 def _pair_relative_momentum_matrix(mom3: np.ndarray) -> np.ndarray:
-    """``|p_i - p_j|`` for every pair; shape ``(n, n)``, symmetric."""
     dp = mom3[:, None, :] - mom3[None, :, :]
     return np.linalg.norm(dp, axis=2)
 
-
 def _spatial_distance_matrix(pos_c: np.ndarray) -> np.ndarray:
-    """``|r_i - r_j|`` for every pair; shape ``(n, n)``, symmetric."""
     dr = pos_c[:, None, :] - pos_c[None, :, :]
     return np.linalg.norm(dr, axis=2)
-
-
-# -----------------------------------------------------------------------------
-# Nuclear binding for the macroscopic prior: tables first, SEMF fallback (MeV)
-# -----------------------------------------------------------------------------
 
 M_P = 938.2723
 M_N = 939.5656
 
 _MASS_TABLE_NAMES: tuple[str, ...] = ("AME2012all",)
 
-
 @functools.lru_cache(maxsize=None)
 def _table(name: str):
     return masstable.Table(name)
 
-
 def binding_energy_liquid_drop(a: int, z: int) -> float:
-    """SEMF binding energy in MeV (used only when nuclide is absent from mass tables)."""
     if a <= 0 or z < 0 or z > a:
         raise ValueError(f"invalid (A, Z)=({a}, {z})")
     n = a - z
@@ -124,9 +93,7 @@ def binding_energy_liquid_drop(a: int, z: int) -> float:
         delta = -12.0 / math.sqrt(a)
     return vol - surf - coul - asym + delta
 
-
 def binding_energy_from_tables(a: int, z: int) -> float | None:
-    """Binding energy in MeV from ``masstable`` if ``(Z, N)`` is in the table."""
     n = a - z
     key = (z, n)
     for name in _MASS_TABLE_NAMES:
@@ -135,23 +102,15 @@ def binding_energy_from_tables(a: int, z: int) -> float | None:
             return float(t.binding_energy.df.loc[key])
     return None
 
-
 def get_mass(a: int, z: int) -> float:
-    """
-    Ground-state mass: ``Z M_p + N M_n - B`` with ``B`` from tables if present,
-    else :func:`binding_energy_liquid_drop` (MeV).
-    """
     n = a - z
     b = binding_energy_from_tables(a, z) or binding_energy_liquid_drop(a, z)
     return z * M_P + n * M_N - b
 
-
 def nuclear_binding_energy(a: int, z: int) -> float:
     return z * M_P + (a - z) * M_N - get_mass(a, z)
 
-
 def binding_prior(a: int, z: int) -> float:
-    """Macroscopic binding prior (MeV), subtracted in :func:`cluster_energy`."""
     if a < 1 or z < 0 or z > a:
         raise ValueError(f"invalid (A, Z)=({a}, {z})")
 
@@ -160,15 +119,7 @@ def binding_prior(a: int, z: int) -> float:
 
     return nuclear_binding_energy(a, z)
 
-
-# -----------------------------------------------------------------------------
-# UrQMD hard EoS parameters (Table 3.1, no Pauli by default), energies in MeV
-# -----------------------------------------------------------------------------
-
-
 class ClusterEnergySettings:
-    """UrQMD-style hard EoS parameters (Table 3.1); all UrQMD pair/triplet code reads from here."""
-
     URQMD_ALPHA_FM_INV2 = 0.25
     URQMD_T1_FM3 = -7264.04
     URQMD_TGAMMA_FM6 = 87.65
@@ -185,6 +136,9 @@ class ClusterEnergySettings:
 
     URQMD_USE_SK3 = False
 
+def configure_cluster_energy_settings(*, full_loss: bool = False) -> None:
+    ClusterEnergySettings.URQMD_USE_PAULI_APPROX = bool(full_loss)
+    ClusterEnergySettings.URQMD_USE_SK3 = bool(full_loss)
 
 def cluster_internal_kinetic(cloud: NucleonCloud, cluster: list[int]) -> float:
     idx = np.asarray(cluster, dtype=np.int64)
@@ -198,11 +152,9 @@ def cluster_internal_kinetic(cloud: NucleonCloud, cluster: list[int]) -> float:
     e_rel = np.sqrt(masses * masses + q2) - masses
     return float(np.sum(e_rel))
 
-
 def _urqmd_sk2_pair_energy_vec(r: np.ndarray) -> np.ndarray:
     alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
     return ClusterEnergySettings.URQMD_T1_FM3 * (alpha / math.pi) ** 1.5 * np.exp(-alpha * r * r)
-
 
 def _urqmd_yukawa_pair_energy_vec(r: np.ndarray) -> np.ndarray:
     out = np.zeros_like(r, dtype=np.float64)
@@ -221,7 +173,6 @@ def _urqmd_yukawa_pair_energy_vec(r: np.ndarray) -> np.ndarray:
     out[mask] = pref * (term1 - term2)
     return out
 
-
 def _urqmd_coulomb_pair_energy_vec(z_prod: np.ndarray, r: np.ndarray) -> np.ndarray:
     out = np.zeros_like(r, dtype=np.float64)
     mask = (r > 1.0e-12) & (z_prod > 0.0)
@@ -232,7 +183,6 @@ def _urqmd_coulomb_pair_energy_vec(z_prod: np.ndarray, r: np.ndarray) -> np.ndar
     alpha = ClusterEnergySettings.URQMD_ALPHA_FM_INV2
     out[mask] = (z_m * ClusterEnergySettings.URQMD_E2_FM / r_m) * erf(np.sqrt(alpha) * r_m)
     return out
-
 
 def _urqmd_pauli_pair_energy_vec(
     r: np.ndarray, p_rel: np.ndarray, same_isospin: np.ndarray
@@ -252,14 +202,9 @@ def _urqmd_pauli_pair_energy_vec(
     )
     return pref * expo * same_isospin
 
-
 def urqmd_pair_energies_upper_triangle(
     pos_c: np.ndarray, mom3: np.ndarray, is_proton_c: np.ndarray
 ) -> np.ndarray:
-    """
-    Pair energies for all unique pairs in a cluster (upper triangle), shape ``(P,)``
-    with ``P = n*(n-1)//2``, same order as ``np.triu_indices(n, k=1)``.
-    """
     n = pos_c.shape[0]
     dr = pos_c[:, None, :] - pos_c[None, :, :]
     r = np.linalg.norm(dr, axis=2)
@@ -279,7 +224,6 @@ def urqmd_pair_energies_upper_triangle(
     e = e_sk2 + e_yuk + e_coul + e_pau
     return np.where(p_rel_p < ClusterEnergySettings.URQMD_P_REL_MAX, e, 0.0)
 
-
 def _urqmd_sk3_triplet_from_pair_values(
     pij: float,
     pik: float,
@@ -297,12 +241,10 @@ def _urqmd_sk3_triplet_from_pair_values(
     term_k = math.exp(-alpha * (rik * rik + rjk * rjk))
     return pref * (term_i + term_j + term_k) / 3.0
 
-
 def cluster_AZ(cloud: NucleonCloud, cluster: list[int]) -> tuple[int, int]:
     a = len(cluster)
     z = sum(1 for i in cluster if cloud.is_proton[i])
     return a, z
-
 
 def cluster_pair_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
     idx = np.asarray(cluster, dtype=int)
@@ -310,7 +252,6 @@ def cluster_pair_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
     mom3 = cloud.four_momentum[idx, 1:4].copy()
     isp = cloud.is_proton[idx]
     return float(np.sum(urqmd_pair_energies_upper_triangle(pos_c, mom3, isp)))
-
 
 def cluster_triplet_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
     if not ClusterEnergySettings.URQMD_USE_SK3:
@@ -335,9 +276,7 @@ def cluster_triplet_energy(cloud: NucleonCloud, cluster: list[int]) -> float:
         )
     return total
 
-
 def cluster_energy(cloud: NucleonCloud, cluster: list[int]) -> ClusterEnergyResult:
-    """UrQMD cluster energy with macroscopic binding :func:`binding_prior` (MeV)."""
     a, z = cluster_AZ(cloud, cluster)
     tint = cluster_internal_kinetic(cloud, cluster)
     vpair = cluster_pair_energy(cloud, cluster)
@@ -354,14 +293,11 @@ def cluster_energy(cloud: NucleonCloud, cluster: list[int]) -> ClusterEnergyResu
         total_energy=total,
     )
 
-
 def partition_loss(cloud: NucleonCloud, partition: list[list[int]]) -> float:
-    """Sum of :func:`cluster_energy` ``total_energy`` over clusters (MeV)."""
     total = 0.0
     for c in partition:
         total += cluster_energy(cloud, c).total_energy
     return total
-
 
 def partition_loss_numpy(
     pos: np.ndarray,
@@ -369,9 +305,4 @@ def partition_loss_numpy(
     is_proton: np.ndarray,
     partition: list[list[int]],
 ) -> float:
-    """:func:`partition_loss` on numpy arrays (MeV).
-
-    ``pos`` is ``(N, 3)`` fm ``(x,y,z)`` or ``(N, 4)`` ``(t, x, y, z)`` (fm/c, fm). Four-momenta
-    rows are ``(E, px, py, pz)`` in MeV and MeV/c.
-    """
     return partition_loss(NucleonCloud.from_numpy(pos, mom, is_proton), partition)

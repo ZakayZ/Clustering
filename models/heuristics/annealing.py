@@ -1,19 +1,3 @@
-"""Simulated annealing on nucleon partitions (:func:`~cluster_energy.partition_loss_numpy`).
-
-CCL-style moves and schedules (``vkireyeu/ccl`` ``makeSA`` / ``makeSA2`` in ``src/MSTUtils.cxx``):
-
-- **Pass 1** (``growth_only=False``): with probability ``p_new`` (scheduled like CCL),
-  move a nucleon out of a multi-body cluster into a **new** singleton cluster; otherwise
-  transfer one nucleon between distinct clusters.
-- **Pass 2** (``growth_only=True``): transfer moves only; greedy acceptance (CCL ``makeSA2``).
-
-Also exports :func:`normalize_partition` / :func:`check_partition` helpers used across baselines.
-
-Does **not** implement CCL ``makeSAchain`` branching on macroscopic binding per cluster.
-"""
-
-from __future__ import annotations
-
 import math
 import random
 import time
@@ -30,7 +14,6 @@ from models.heuristics.utils import EventBaseline, make_event_baseline
 if TYPE_CHECKING:
     from models.heuristics.protocol import BaselineModel
 
-
 def normalize_partition(partition: list[list[int]]) -> list[list[int]]:
     cleaned: list[list[int]] = []
     for c in partition:
@@ -40,7 +23,6 @@ def normalize_partition(partition: list[list[int]]) -> list[list[int]]:
     cleaned.sort(key=lambda x: (len(x), x), reverse=True)
     return cleaned
 
-
 def check_partition(partition: list[list[int]], universe: list[int]) -> None:
     flat: list[int] = []
     for c in partition:
@@ -48,33 +30,17 @@ def check_partition(partition: list[list[int]], universe: list[int]) -> None:
     if sorted(flat) != sorted(int(u) for u in universe):
         raise ValueError("partition does not cover universe")
 
-
 class SAStepsMode(str, Enum):
-    """Analog of ``CClusterizer::SAStepsMode``."""
-
     FIXED = "fixed"
     LINEAR = "linear"
     EXPONENTIAL = "exponential"
 
-
 class SAProbMode(str, Enum):
-    """Analog of ``CClusterizer::SAProbMode``."""
-
     FIXED = "fixed"
     LINEAR = "linear"
 
-
 @dataclass(frozen=True)
 class CCLAnnealParams:
-    """Hyperparameters mapped from CCL ``libccl.h`` simulated-annealing fields.
-
-    **Defaults** tune post–cut/coalescence refinement with a bounded wall clock per event
-    (``max_seconds``); see ``clustering/benchmarks/coalesce_ccl_anneal_search.json``.
-
-    For the older exponential ``CCL`` schedule used as a search baseline,
-    see :data:`REFERENCE_CCL_ANNEAL_PARAMS`.
-    """
-
     t_max: float = 1.0
     t_min: float = 5e-7
     cool: float = 0.92
@@ -86,7 +52,6 @@ class CCLAnnealParams:
     use_metropolis_hastings: bool = False
     stag_min: int = 60
     stag_denom: int = 10
-    #: Second-pass ``steps``; ``< 0`` means ``2 * steps`` (CCL ``sa_Steps2`` default).
     steps_2: int = 360
     two_phase: bool = True
     rng_seed: int = 0
@@ -95,9 +60,6 @@ class CCLAnnealParams:
     def resolve_steps_2(self) -> int:
         return int(self.steps * 2) if self.steps_2 < 0 else int(self.steps_2)
 
-
-#: Pre–tuning exponential schedule (``.95`` cooling, exponential steps scaling), **uncapped**.
-#: Hyperparameter searches compare randomized trials against this reference + ``max_seconds``.
 REFERENCE_CCL_ANNEAL_PARAMS = CCLAnnealParams(
     t_max=1.0,
     t_min=1e-5,
@@ -116,10 +78,8 @@ REFERENCE_CCL_ANNEAL_PARAMS = CCLAnnealParams(
     max_seconds=None,
 )
 
-
 def _partition_from_map(clusters: dict[int, list[int]]) -> list[list[int]]:
     return normalize_partition([sorted(lst) for lst in clusters.values() if lst])
-
 
 def _loss(
     pos: np.ndarray,
@@ -128,7 +88,6 @@ def _loss(
     clusters: dict[int, list[int]],
 ) -> float:
     return float(partition_loss_numpy(pos, mom, is_proton, _partition_from_map(clusters)))
-
 
 def _steps_at_level(*, cfg: CCLAnnealParams, sa_level: int, t: float) -> int:
     if cfg.steps_mode == SAStepsMode.FIXED:
@@ -139,7 +98,6 @@ def _steps_at_level(*, cfg: CCLAnnealParams, sa_level: int, t: float) -> int:
         s = int(cfg.steps * (cfg.cool**sa_level))
     return max(1, s)
 
-
 def _p_new_effective(cfg: CCLAnnealParams, t: float) -> float:
     if cfg.p_new_mode == SAProbMode.FIXED:
         return float(cfg.p_new)
@@ -148,7 +106,6 @@ def _p_new_effective(cfg: CCLAnnealParams, t: float) -> float:
         return float(cfg.p_new_min)
     ratio = (t - cfg.t_min) / span
     return float(cfg.p_new_min + (cfg.p_new - cfg.p_new_min) * ratio)
-
 
 def _try_propose_transfer(
     clusters: dict[int, list[int]],
@@ -180,7 +137,6 @@ def _try_propose_transfer(
     nxt[cid_dst] = sorted(set(nxt[cid_dst]))
     return nxt
 
-
 def _try_propose_split_new(
     clusters: dict[int, list[int]],
     max_id: int,
@@ -204,7 +160,6 @@ def _try_propose_split_new(
     nxt[new_id] = [particle]
     return nxt, new_id
 
-
 def ccl_sa_refine_partition(
     pos: np.ndarray,
     mom: np.ndarray,
@@ -217,8 +172,6 @@ def ccl_sa_refine_partition(
     growth_only: bool = False,
     steps_override: int | None = None,
 ) -> tuple[list[list[int]], float]:
-    """Run one CCL-like SA trajectory; return **best** partition and its loss."""
-
     rng = random.Random(int(rng_seed) & 0xFFFFFFFF)
 
     clusters: dict[int, list[int]] = {}
@@ -315,11 +268,8 @@ def ccl_sa_refine_partition(
 
     return normalize_partition([sorted(v) for v in best_clusters.values() if v]), best_loss
 
-
 @dataclass
 class CCLAnnealRefinementModel:
-    """Wrap any :class:`~models.heuristics.protocol.BaselineModel` with CCL-style SA."""
-
     inner: BaselineModel
     params: CCLAnnealParams = field(default_factory=CCLAnnealParams)
     _call_idx: int = field(default=0, repr=False)

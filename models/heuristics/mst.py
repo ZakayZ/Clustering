@@ -1,7 +1,3 @@
-"""CCL-style MST / percolation (pair-COM proximity). See :class:`MSTModel` for tuned defaults."""
-
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,10 +7,8 @@ from scipy.sparse.csgraph import connected_components
 from models.heuristics.utils import EventBaseline, make_event_baseline
 from models.heuristics.coalescence import _components_to_partition, _pos3_stack
 
-# Tuned on ``urqmd_nucleons_1k`` (see ``scripts/search_mst_negative_loss.py``): negative mean partition loss.
 MST_DEFAULT_R_CUT_FM = 4.5
 MST_DEFAULT_P_CUT_MEVC = 40.0
-
 
 def _boost_spatial_batch(
     t: np.ndarray,
@@ -23,12 +17,6 @@ def _boost_spatial_batch(
     *,
     beta_sq_eps: float = 1e-24,
 ) -> np.ndarray:
-    """
-    Boost spatial coordinates ``r`` together with time ``t`` using isotropic ``beta``.
-
-    Same Lorentz transformation as for a 4-vector ``(t, r)`` with boost velocity ``beta``.
-    Shapes: ``t`` (...,), ``r`` (..., 3), ``beta`` (..., 3); broadcasting on leading dims.
-    """
     beta_sq = np.sum(beta * beta, axis=-1)
     small = beta_sq < beta_sq_eps
     eps = 1e-30
@@ -43,9 +31,7 @@ def _boost_spatial_batch(
     )
     return np.where(small[..., None], r, r_prime)
 
-
 def _pair_com_separation_fm(pos3: np.ndarray, t: np.ndarray, p4: np.ndarray) -> np.ndarray:
-    """Pairwise spatial separation in fm in the pair COM frame; shape ``(N, N)`` symmetric."""
     n = int(pos3.shape[0])
     if n == 0:
         return np.zeros((0, 0), dtype=np.float64)
@@ -62,13 +48,11 @@ def _pair_com_separation_fm(pos3: np.ndarray, t: np.ndarray, p4: np.ndarray) -> 
     d = ri_p - rj_p
     return np.sqrt(np.maximum(np.sum(d * d, axis=-1), 0.0))
 
-
 def _cluster_passes_momentum_gate(
     mom_loc: np.ndarray,
     member_idx: np.ndarray,
     p_cut_mevc: float,
 ) -> bool:
-    """CCL-style: COM from summed lab 4-momenta; each constituent must have ``|p| < p_cut`` in that frame."""
     if member_idx.size <= 1:
         return True
     p4 = mom_loc[np.asarray(member_idx, dtype=np.int64)]
@@ -88,13 +72,11 @@ def _cluster_passes_momentum_gate(
             return False
     return True
 
-
 def _dsu_find(parent: np.ndarray, x: int) -> int:
     while parent[x] != x:
         parent[x] = parent[parent[parent[x]]]
         x = int(parent[x])
     return int(x)
-
 
 def _mst_partition_dsu_gated(
     dist_fm: np.ndarray,
@@ -106,7 +88,6 @@ def _mst_partition_dsu_gated(
     p_cut_mevc: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return local labels ``0..n-1`` after DSU with CCL-like optional momentum gates."""
     n = int(dist_fm.shape[0])
     parent = np.arange(n, dtype=np.int64)
     iu, ju = np.triu_indices(n, k=1)
@@ -142,7 +123,6 @@ def _mst_partition_dsu_gated(
     _, lab = np.unique(roots, return_inverse=True)
     return lab.astype(np.int64, copy=False)
 
-
 def mst_partition_numpy(
     pos: np.ndarray,
     mom: np.ndarray,
@@ -154,13 +134,6 @@ def mst_partition_numpy(
     p_cut_mevc: float = MST_DEFAULT_P_CUT_MEVC,
     rng_seed: int = 0,
 ) -> list[list[int]]:
-    """
-    CCL-style MST clusters: connect if pair separation in the pair COM frame ``<= r_cut_fm``.
-
-    Default ``r_cut_fm``, ``p_cut_mevc``, and merge gate match :class:`MSTModel`.
-    Set ``check_pair_momentum`` and ``check_merge_momentum`` to ``False`` for the fast
-    connected-components path (no momentum gates).
-    """
     pos0 = np.asarray(pos, dtype=np.float64)
     mom0 = np.asarray(mom, dtype=np.float64)
     idx = np.asarray(indices, dtype=np.int64)
@@ -213,18 +186,8 @@ def mst_partition_numpy(
     )
     return _components_to_partition(idx, n, lab)
 
-
 @dataclass
 class MSTModel:
-    """
-    Pair-COM spatial proximity (CCL-style) with optional momentum gates.
-
-    Defaults target **negative** mean :func:`~cluster_energy.partition_loss_numpy` on
-    ``urqmd_nucleons_1k`` (seed 0 train/hold splits): merge gate with
-    ``r_cut_fm`` and ``p_cut_mevc`` defaults: :data:`MST_DEFAULT_R_CUT_FM`,
-    :data:`MST_DEFAULT_P_CUT_MEVC`. Re-tune with ``scripts/search_mst_negative_loss.py``.
-    """
-
     r_cut_fm: float = MST_DEFAULT_R_CUT_FM
     check_pair_momentum: bool = False
     check_merge_momentum: bool = True

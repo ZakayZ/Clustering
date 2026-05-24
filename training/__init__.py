@@ -1,5 +1,3 @@
-"""Training loops for affinity graph policies (supervised, REINFORCE, PPO, A2C)."""
-
 from .a2c import collect_rollout_ac, train_actor_critic, warm_start_value_head
 from .ppo import collect_rollout_ppo, train_ppo
 from .reinforce import collect_rollout, train_reinforce
